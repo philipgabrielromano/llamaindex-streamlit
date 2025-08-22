@@ -175,4 +175,145 @@ class SharePointClient:
             },
             {
                 'id': 'mock_2', 
-                'filename': '
+                'filename': 'Test Report.docx',
+                'content': 'This is a test report containing quarterly analysis and recommendations for improvement. The report covers multiple areas including performance metrics.',
+                'modified': (datetime.now() - timedelta(hours=2)).isoformat(),
+                'file_path': '/Shared Documents/Test Report.docx',
+                'metadata': {
+                    'source': 'mock_data',
+                    'created_at': (datetime.now() - timedelta(hours=2)).isoformat(),
+                    'file_size': 2048,
+                    'author': 'System'
+                }
+            }
+        ]
+        
+        st.info(f"📋 Generated {len(mock_docs)} mock documents for testing")
+        return mock_docs
+    
+    def _process_documents(self, documents, since_date, max_docs):
+        """Process SharePoint documents into the expected format"""
+        doc_list = []
+        processed_count = 0
+        
+        for doc in documents:
+            try:
+                # Extract metadata with fallbacks
+                filename = (
+                    doc.metadata.get('filename') or 
+                    doc.metadata.get('file_name') or 
+                    doc.metadata.get('title') or 
+                    doc.metadata.get('name') or
+                    f'Document_{processed_count + 1}'
+                )
+                
+                file_path = (
+                    doc.metadata.get('file_path') or 
+                    doc.metadata.get('source') or 
+                    doc.metadata.get('url') or
+                    ''
+                )
+                
+                modified_date = (
+                    doc.metadata.get('last_modified') or 
+                    doc.metadata.get('modified') or 
+                    doc.metadata.get('date_modified') or
+                    datetime.now().isoformat()
+                )
+                
+                doc_id = (
+                    doc.metadata.get('id') or 
+                    doc.metadata.get('doc_id') or 
+                    doc.metadata.get('document_id') or
+                    f'doc_{processed_count + 1}'
+                )
+                
+                # Create document info
+                doc_info = {
+                    'content': doc.text or '',
+                    'filename': filename,
+                    'file_path': file_path,
+                    'modified': modified_date,
+                    'id': doc_id,
+                    'metadata': {
+                        **doc.metadata,
+                        'source': 'sharepoint',
+                        'processed_at': datetime.now().isoformat(),
+                        'text_length': len(doc.text) if doc.text else 0,
+                        'word_count': len(doc.text.split()) if doc.text else 0
+                    }
+                }
+                
+                # Apply filters
+                if since_date:
+                    try:
+                        doc_modified_str = doc_info['modified']
+                        if isinstance(doc_modified_str, str):
+                            if 'T' in doc_modified_str:
+                                doc_modified = datetime.fromisoformat(doc_modified_str.replace('Z', '+00:00'))
+                            else:
+                                doc_modified = datetime.fromisoformat(doc_modified_str)
+                        else:
+                            doc_modified = doc_modified_str
+                        
+                        if doc_modified < since_date:
+                            continue
+                    except Exception as date_error:
+                        st.warning(f"Could not parse date for {filename}: {date_error}")
+                
+                # Check content
+                if not doc.text or not doc.text.strip():
+                    st.warning(f"⚠️ No text content found in {filename}")
+                    continue
+                
+                doc_list.append(doc_info)
+                processed_count += 1
+                
+                # Apply max docs limit
+                if max_docs and processed_count >= max_docs:
+                    st.info(f"📊 Reached maximum document limit: {max_docs}")
+                    break
+                    
+            except Exception as doc_error:
+                st.warning(f"Error processing document: {str(doc_error)}")
+                continue
+        
+        st.success(f"✅ Successfully processed {len(doc_list)} documents")
+        return doc_list
+    
+    def get_recent_changes(self, hours: int = 24) -> List[Dict]:
+        """Get documents modified in the last N hours"""
+        since_date = datetime.now() - timedelta(hours=hours)
+        st.info(f"🕒 Looking for documents modified since: {since_date.strftime('%Y-%m-%d %H:%M:%S')}")
+        return self.get_documents(since_date=since_date)
+    
+    def validate_configuration(self) -> Dict[str, bool]:
+        """Validate SharePoint configuration"""
+        config_status = {
+            'client_id': bool(self.client_id),
+            'client_secret': bool(self.client_secret),
+            'tenant_id': bool(self.tenant_id),
+            'site_name': bool(self.site_name),
+            'reader_available': SHAREPOINT_AVAILABLE and SharePointReader is not None,
+            'reader_initialized': bool(self.reader)
+        }
+        
+        return config_status
+    
+    def get_site_info(self) -> Dict:
+        """Get SharePoint site information"""
+        try:
+            site_info = {
+                'site_name': self.site_name or 'Not configured',
+                'tenant_id': self.tenant_id[:8] + "..." if self.tenant_id else "Not configured",
+                'client_id': self.client_id[:8] + "..." if self.client_id else "Not configured",
+                'reader_status': 'Available' if self.reader else 'Not available',
+                'reader_package_status': 'Installed' if SHAREPOINT_AVAILABLE else 'Missing',
+                'estimated_url': f"https://[tenant].sharepoint.com/sites/{self.site_name}" if self.site_name else "Not configured"
+            }
+            
+            return site_info
+            
+        except Exception as e:
+            st.error(f"Error getting site info: {str(e)}")
+            return {}
