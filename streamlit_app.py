@@ -516,7 +516,7 @@ def display_collection_browser(astra_client):
         st.error(f"❌ Error browsing collection: {str(e)}")
 
 def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
-    """Enhanced data ingestion with document browsing and folder selection"""
+    """Enhanced data ingestion with better debugging"""
     st.header("📥 Data Ingestion & Document Management")
     
     # Create main sections
@@ -541,22 +541,24 @@ def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
             # Custom folder path option
             custom_path = st.text_input(
                 "Custom Folder Path (optional)",
-                placeholder="e.g., /Shared Documents/Reports/2024",
+                placeholder="e.g., Documents/Reports/2024",
                 help="Specify a specific folder path within the library"
             )
             
             # Use custom path if provided, otherwise use selected folder
             final_folder_path = custom_path if custom_path else selected_folder
             
-            # File type filtering
+            # File type filtering with debugging
             st.markdown("**File Type Filters:**")
+            st.info("💡 Leave all unchecked to see ALL file types")
+            
             file_type_cols = st.columns(4)
             
             selected_file_types = []
             with file_type_cols[0]:
-                if st.checkbox("📄 PDF", value=True):
+                if st.checkbox("📄 PDF"):
                     selected_file_types.append(".pdf")
-                if st.checkbox("📝 Word", value=True):
+                if st.checkbox("📝 Word"):
                     selected_file_types.append(".docx")
             
             with file_type_cols[1]:
@@ -572,13 +574,27 @@ def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
                     selected_file_types.append(".html")
             
             with file_type_cols[3]:
-                if st.checkbox("📑 Markdown"):
-                    selected_file_types.append(".md")
-                if st.checkbox("⚙️ JSON"):
-                    selected_file_types.append(".json")
+                if st.checkbox("📑 All Files", value=True):
+                    selected_file_types = None  # No filtering
+            
+            # Date filtering
+            st.markdown("**Date Filtering:**")
+            date_filter_enabled = st.checkbox("Enable Date Filter")
+            
+            since_date = None
+            if date_filter_enabled:
+                days_back = st.slider("Days back", 1, 30, 7)
+                since_date = datetime.now() - timedelta(days=days_back)
+                st.info(f"Will only show files modified since: {since_date.strftime('%Y-%m-%d')}")
         
         # Document preview and selection
         st.subheader("📋 Available Documents")
+        
+        # Show current filter settings
+        if selected_file_types:
+            st.info(f"🔍 File type filter: {', '.join(selected_file_types)}")
+        else:
+            st.info("🔍 No file type filter (showing all files)")
         
         # Fetch documents button
         if st.button("🔍 Browse SharePoint Documents", type="secondary"):
@@ -586,11 +602,23 @@ def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
                 documents = sharepoint_client.get_documents(
                     folder_path=final_folder_path,
                     file_types=selected_file_types,
+                    since_date=since_date,
                     max_docs=50  # Limit for browsing
                 )
                 
                 # Store documents in session state for selection
                 st.session_state['available_documents'] = documents
+                st.session_state['last_fetch_info'] = {
+                    'folder': final_folder_path,
+                    'file_types': selected_file_types,
+                    'since_date': since_date,
+                    'count': len(documents)
+                }
+        
+        # Show last fetch info
+        if 'last_fetch_info' in st.session_state:
+            info = st.session_state.last_fetch_info
+            st.info(f"📊 Last fetch: {info['count']} documents from '{info['folder']}'")
         
         # Display available documents for selection
         if 'available_documents' in st.session_state and st.session_state.available_documents:
@@ -598,175 +626,23 @@ def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
             
             st.success(f"📄 Found {len(documents)} documents")
             
-            # Create document selection interface
-            st.markdown("**Select Documents to Process:**")
+            # Show document details
+            with st.expander("📋 Document Details"):
+                for doc in documents[:5]:  # Show first 5
+                    st.write(f"**{doc['filename']}**")
+                    st.write(f"  Modified: {doc['modified']}")
+                    st.write(f"  Size: {doc['metadata'].get('file_size', 0)} bytes")
+                    st.write(f"  Content length: {len(doc.get('content', ''))} characters")
+                    if len(documents) > 5:
+                        st.write("...")
             
-            # Select all/none buttons
-            select_col1, select_col2, select_col3 = st.columns([1, 1, 2])
+            # Rest of your document selection interface...
+            # (The checkbox selection code you already have)
             
-            with select_col1:
-                if st.button("✅ Select All"):
-                    for i in range(len(documents)):
-                        st.session_state[f'doc_select_{i}'] = True
-            
-            with select_col2:
-                if st.button("❌ Select None"):
-                    for i in range(len(documents)):
-                        st.session_state[f'doc_select_{i}'] = False
-            
-            with select_col3:
-                # Quick filter by date
-                date_filter = st.selectbox(
-                    "Quick Filter",
-                    ["All Documents", "Last 24 hours", "Last Week", "Last Month"],
-                    key="doc_date_filter"
-                )
-            
-            # Document list with checkboxes
-            selected_docs = []
-            
-            with st.container():
-                st.markdown("---")
-                
-                # Display documents in a nice format
-                for i, doc in enumerate(documents):
-                    # Apply date filter
-                    if date_filter != "All Documents":
-                        try:
-                            doc_date = datetime.fromisoformat(doc['modified'].replace('Z', '+00:00'))
-                            now = datetime.now()
-                            
-                            if date_filter == "Last 24 hours" and (now - doc_date).days >= 1:
-                                continue
-                            elif date_filter == "Last Week" and (now - doc_date).days >= 7:
-                                continue
-                            elif date_filter == "Last Month" and (now - doc_date).days >= 30:
-                                continue
-                        except:
-                            pass  # Include documents with unparseable dates
-                    
-                    # Document row
-                    doc_col1, doc_col2 = st.columns([1, 4])
-                    
-                    with doc_col1:
-                        selected = st.checkbox(
-                            "Select",
-                            key=f'doc_select_{i}',
-                            label_visibility="collapsed"
-                        )
-                        
-                        if selected:
-                            selected_docs.append(doc)
-                    
-                    with doc_col2:
-                        # Document info
-                        file_icon = get_file_icon(doc['filename'])
-                        file_size = format_file_size(doc.get('metadata', {}).get('file_size', 0))
-                        modified_date = format_timestamp(doc['modified'], '%Y-%m-%d %H:%M')
-                        
-                        st.markdown(f"""
-                        **{file_icon} {doc['filename']}**  
-                        📅 Modified: {modified_date} | 📏 Size: {file_size}  
-                        📍 Path: `{doc.get('file_path', 'Unknown')}`
-                        """)
-                        
-                        # Show content preview
-                        content_preview = doc.get('content', '')[:200] + "..." if len(doc.get('content', '')) > 200 else doc.get('content', '')
-                        if content_preview:
-                            with st.expander(f"👁️ Preview - {doc['filename'][:30]}..."):
-                                st.text(content_preview)
-                        
-                        st.markdown("---")
-            
-            # Process selected documents
-            if selected_docs:
-                st.subheader(f"🚀 Process {len(selected_docs)} Selected Documents")
-                
-                # Processing options
-                process_col1, process_col2, process_col3 = st.columns(3)
-                
-                with process_col1:
-                    chunk_size = st.number_input(
-                        "Chunk Size",
-                        min_value=100,
-                        max_value=2000,
-                        value=1000,
-                        key="selected_chunk_size"
-                    )
-                
-                with process_col2:
-                    chunk_overlap = st.number_input(
-                        "Chunk Overlap",
-                        min_value=0,
-                        max_value=500,
-                        value=200,
-                        key="selected_chunk_overlap"
-                    )
-                
-                with process_col3:
-                    st.metric("Documents Selected", len(selected_docs))
-                
-                # Process button
-                if st.button("🔄 Process Selected Documents", type="primary"):
-                    process_selected_documents(
-                        selected_docs, astra_client, document_processor, 
-                        chunk_size, chunk_overlap
-                    )
         else:
             st.info("👆 Click 'Browse SharePoint Documents' to see available files")
     
-    with col2:
-        st.subheader("📤 Manual Upload")
-        
-        # File uploader
-        uploaded_files = st.file_uploader(
-            "Upload Documents",
-            accept_multiple_files=True,
-            type=['pdf', 'docx', 'txt', 'pptx', 'xlsx', 'html', 'md', 'json'],
-            help="Upload individual files for processing",
-            key="manual_upload"
-        )
-        
-        if uploaded_files:
-            st.success(f"📁 {len(uploaded_files)} files uploaded")
-            
-            # Show uploaded files
-            for file in uploaded_files:
-                file_icon = get_file_icon(file.name)
-                st.markdown(f"{file_icon} **{file.name}** ({format_file_size(file.size)})")
-            
-            # Upload processing options
-            upload_col1, upload_col2 = st.columns(2)
-            
-            with upload_col1:
-                upload_chunk_size = st.number_input(
-                    "Chunk Size",
-                    min_value=100,
-                    max_value=2000,
-                    value=1000,
-                    key="upload_chunk_size"
-                )
-            
-            with upload_col2:
-                upload_chunk_overlap = st.number_input(
-                    "Chunk Overlap",
-                    min_value=0,
-                    max_value=500,
-                    value=200,
-                    key="upload_chunk_overlap"
-                )
-            
-            if st.button("📄 Process Uploaded Files", type="primary"):
-                process_uploaded_files(
-                    uploaded_files, astra_client, document_processor,
-                    upload_chunk_size, upload_chunk_overlap
-                )
-        
-        # Collection browser
-        st.subheader("🗂️ Browse Collection")
-        
-        if st.button("👁️ View Stored Documents"):
-            display_collection_browser(astra_client)
+    # Rest of your code...
 
 def search_query_tab(astra_client):
     """Enhanced search with document browsing capabilities"""
