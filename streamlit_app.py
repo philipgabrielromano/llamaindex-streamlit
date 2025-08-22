@@ -1,4 +1,4 @@
-# streamlit_app.py (Fixed - set_page_config first)
+# streamlit_app.py (Complete Enhanced Version)
 
 # MUST BE THE VERY FIRST STREAMLIT COMMAND
 import streamlit as st
@@ -95,6 +95,17 @@ st.markdown("""
         font-weight: bold;
         color: #1f77b4;
     }
+    .document-card {
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        background-color: #f8f9fa;
+    }
+    .file-icon {
+        font-size: 1.2em;
+        margin-right: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,6 +177,25 @@ class ChangeDetector:
                 changes['unchanged_files'].append(doc)
         
         return changes, current_fingerprints
+
+def get_file_icon(filename: str) -> str:
+    """Get appropriate icon for file type"""
+    extension = filename.split('.')[-1].lower() if '.' in filename else ''
+    
+    icons = {
+        'pdf': '📄',
+        'docx': '📝', 'doc': '📝',
+        'pptx': '📊', 'ppt': '📊',
+        'xlsx': '📈', 'xls': '📈',
+        'txt': '📋',
+        'html': '🌐', 'htm': '🌐',
+        'md': '📑',
+        'json': '⚙️',
+        'xml': '🔧',
+        'csv': '📊'
+    }
+    
+    return icons.get(extension, '📄')
 
 def get_next_sync_time() -> Optional[datetime]:
     """Calculate when the next sync should occur"""
@@ -314,6 +344,832 @@ def check_configuration():
     
     return missing_vars, configured_vars
 
+def process_selected_documents(selected_docs, astra_client, document_processor, chunk_size, chunk_overlap):
+    """Process the selected SharePoint documents"""
+    # Update processor settings
+    document_processor.update_chunk_settings(chunk_size, chunk_overlap)
+    
+    with st.spinner(f"Processing {len(selected_docs)} selected documents..."):
+        try:
+            # Process documents
+            processed_docs = document_processor.process_sharepoint_documents(selected_docs)
+            
+            if processed_docs:
+                # Insert into Astra DB
+                result = astra_client.insert_documents(processed_docs)
+                
+                # Update session state
+                successful = result.get('successful', 0)
+                failed = result.get('failed', 0)
+                
+                st.session_state.document_count += successful
+                
+                # Add to processing status
+                for i, doc in enumerate(selected_docs):
+                    status = 'Success' if i < successful else 'Failed'
+                    st.session_state.processing_status.append({
+                        'filename': doc.get('filename', f'Document {i+1}'),
+                        'status': status,
+                        'timestamp': datetime.now(),
+                        'source': 'selected_sharepoint',
+                        'chunks': 1
+                    })
+                
+                # Show results
+                if successful > 0:
+                    st.success(f"✅ Successfully processed {successful} documents!")
+                
+                if failed > 0:
+                    st.warning(f"⚠️ {failed} documents failed to process")
+                
+                # Clear selection
+                for i in range(len(st.session_state.get('available_documents', []))):
+                    if f'doc_select_{i}' in st.session_state:
+                        st.session_state[f'doc_select_{i}'] = False
+                
+            else:
+                st.error("❌ No documents were successfully processed")
+                
+        except Exception as e:
+            st.error(f"❌ Error processing documents: {str(e)}")
+
+def process_uploaded_files(uploaded_files, astra_client, document_processor, chunk_size, chunk_overlap):
+    """Process manually uploaded files"""
+    # Update processor settings
+    document_processor.update_chunk_settings(chunk_size, chunk_overlap)
+    
+    with st.spinner(f"Processing {len(uploaded_files)} uploaded files..."):
+        try:
+            successful_count = 0
+            failed_count = 0
+            
+            for file in uploaded_files:
+                try:
+                    # Process document
+                    document = document_processor.process_uploaded_file(file)
+                    
+                    if document:
+                        # Insert into Astra DB
+                        result = astra_client.insert_documents([document])
+                        
+                        if result.get('successful', 0) > 0:
+                            successful_count += 1
+                            st.session_state.processing_status.append({
+                                'filename': file.name,
+                                'status': 'Success',
+                                'timestamp': datetime.now(),
+                                'source': 'manual_upload',
+                                'chunks': 1
+                            })
+                        else:
+                            failed_count += 1
+                            st.session_state.processing_status.append({
+                                'filename': file.name,
+                                'status': 'Error: Failed to index',
+                                'timestamp': datetime.now(),
+                                'source': 'manual_upload',
+                                'chunks': 0
+                            })
+                    else:
+                        failed_count += 1
+                        
+                except Exception as e:
+                    failed_count += 1
+                    st.session_state.processing_status.append({
+                        'filename': file.name,
+                        'status': f'Error: {str(e)}',
+                        'timestamp': datetime.now(),
+                        'source': 'manual_upload',
+                        'chunks': 0
+                    })
+            
+            # Update session state
+            st.session_state.document_count += successful_count
+            st.session_state.last_sync_time = datetime.now()
+            
+            # Display results
+            if successful_count > 0:
+                st.success(f"✅ Successfully processed {successful_count}/{len(uploaded_files)} files!")
+            
+            if failed_count > 0:
+                st.warning(f"⚠️ {failed_count} files failed to process. Check the status table for details.")
+                
+        except Exception as e:
+            st.error(f"❌ Error processing uploaded files: {str(e)}")
+
+def display_collection_browser(astra_client):
+    """Display documents stored in the collection"""
+    try:
+        # Get collection stats
+        stats = astra_client.get_collection_stats()
+        
+        st.subheader("📊 Collection Overview")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Documents", stats.get('document_count', 'Unknown'))
+        
+        with col2:
+            st.metric("Collection", stats.get('collection_name', 'Unknown'))
+        
+        with col3:
+            status = stats.get('status', 'Unknown')
+            status_icon = '✅' if status == 'active' else '❌'
+            st.metric("Status", f"{status_icon} {status.title()}")
+        
+        # Note about search functionality
+        st.info("""
+        🔍 **Document Search & Retrieval**
+        
+        Use the **Search & Query** tab to:
+        - Search through your stored documents
+        - View document content and metadata
+        - Get AI-powered responses based on your document collection
+        """)
+        
+        # Show recent processing activity
+        if st.session_state.processing_status:
+            st.subheader("📝 Recent Processing Activity")
+            
+            recent_items = st.session_state.processing_status[-10:]  # Last 10 items
+            
+            for item in reversed(recent_items):
+                col1, col2, col3 = st.columns([3, 1, 1])
+                
+                with col1:
+                    status_icon = '✅' if item['status'] == 'Success' else '❌'
+                    st.write(f"{status_icon} {item['filename']}")
+                
+                with col2:
+                    st.write(item['source'])
+                
+                with col3:
+                    timestamp = item['timestamp']
+                    if isinstance(timestamp, datetime):
+                        time_str = timestamp.strftime('%H:%M:%S')
+                    else:
+                        time_str = str(timestamp)[:8]
+                    st.write(time_str)
+        
+    except Exception as e:
+        st.error(f"❌ Error browsing collection: {str(e)}")
+
+def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
+    """Enhanced data ingestion with document browsing and folder selection"""
+    st.header("📥 Data Ingestion & Document Management")
+    
+    # Create main sections
+    col1, col2 = st.columns([3, 2])
+    
+    with col1:
+        st.subheader("🔗 SharePoint Integration")
+        
+        # SharePoint folder selection
+        with st.expander("📁 SharePoint Folder Configuration", expanded=True):
+            # Get available folders/libraries
+            available_folders = sharepoint_client.get_available_libraries()
+            
+            # Folder selection
+            selected_folder = st.selectbox(
+                "Document Library",
+                options=available_folders,
+                index=0 if available_folders else None,
+                help="Select the SharePoint document library to sync from"
+            )
+            
+            # Custom folder path option
+            custom_path = st.text_input(
+                "Custom Folder Path (optional)",
+                placeholder="e.g., /Shared Documents/Reports/2024",
+                help="Specify a specific folder path within the library"
+            )
+            
+            # Use custom path if provided, otherwise use selected folder
+            final_folder_path = custom_path if custom_path else selected_folder
+            
+            # File type filtering
+            st.markdown("**File Type Filters:**")
+            file_type_cols = st.columns(4)
+            
+            selected_file_types = []
+            with file_type_cols[0]:
+                if st.checkbox("📄 PDF", value=True):
+                    selected_file_types.append(".pdf")
+                if st.checkbox("📝 Word", value=True):
+                    selected_file_types.append(".docx")
+            
+            with file_type_cols[1]:
+                if st.checkbox("📊 PowerPoint"):
+                    selected_file_types.append(".pptx")
+                if st.checkbox("📈 Excel"):
+                    selected_file_types.append(".xlsx")
+            
+            with file_type_cols[2]:
+                if st.checkbox("📋 Text"):
+                    selected_file_types.append(".txt")
+                if st.checkbox("🌐 HTML"):
+                    selected_file_types.append(".html")
+            
+            with file_type_cols[3]:
+                if st.checkbox("📑 Markdown"):
+                    selected_file_types.append(".md")
+                if st.checkbox("⚙️ JSON"):
+                    selected_file_types.append(".json")
+        
+        # Document preview and selection
+        st.subheader("📋 Available Documents")
+        
+        # Fetch documents button
+        if st.button("🔍 Browse SharePoint Documents", type="secondary"):
+            with st.spinner("Fetching documents from SharePoint..."):
+                documents = sharepoint_client.get_documents(
+                    folder_path=final_folder_path,
+                    file_types=selected_file_types,
+                    max_docs=50  # Limit for browsing
+                )
+                
+                # Store documents in session state for selection
+                st.session_state['available_documents'] = documents
+        
+        # Display available documents for selection
+        if 'available_documents' in st.session_state and st.session_state.available_documents:
+            documents = st.session_state.available_documents
+            
+            st.success(f"📄 Found {len(documents)} documents")
+            
+            # Create document selection interface
+            st.markdown("**Select Documents to Process:**")
+            
+            # Select all/none buttons
+            select_col1, select_col2, select_col3 = st.columns([1, 1, 2])
+            
+            with select_col1:
+                if st.button("✅ Select All"):
+                    for i in range(len(documents)):
+                        st.session_state[f'doc_select_{i}'] = True
+            
+            with select_col2:
+                if st.button("❌ Select None"):
+                    for i in range(len(documents)):
+                        st.session_state[f'doc_select_{i}'] = False
+            
+            with select_col3:
+                # Quick filter by date
+                date_filter = st.selectbox(
+                    "Quick Filter",
+                    ["All Documents", "Last 24 hours", "Last Week", "Last Month"],
+                    key="doc_date_filter"
+                )
+            
+            # Document list with checkboxes
+            selected_docs = []
+            
+            with st.container():
+                st.markdown("---")
+                
+                # Display documents in a nice format
+                for i, doc in enumerate(documents):
+                    # Apply date filter
+                    if date_filter != "All Documents":
+                        try:
+                            doc_date = datetime.fromisoformat(doc['modified'].replace('Z', '+00:00'))
+                            now = datetime.now()
+                            
+                            if date_filter == "Last 24 hours" and (now - doc_date).days >= 1:
+                                continue
+                            elif date_filter == "Last Week" and (now - doc_date).days >= 7:
+                                continue
+                            elif date_filter == "Last Month" and (now - doc_date).days >= 30:
+                                continue
+                        except:
+                            pass  # Include documents with unparseable dates
+                    
+                    # Document row
+                    doc_col1, doc_col2 = st.columns([1, 4])
+                    
+                    with doc_col1:
+                        selected = st.checkbox(
+                            "Select",
+                            key=f'doc_select_{i}',
+                            label_visibility="collapsed"
+                        )
+                        
+                        if selected:
+                            selected_docs.append(doc)
+                    
+                    with doc_col2:
+                        # Document info
+                        file_icon = get_file_icon(doc['filename'])
+                        file_size = format_file_size(doc.get('metadata', {}).get('file_size', 0))
+                        modified_date = format_timestamp(doc['modified'], '%Y-%m-%d %H:%M')
+                        
+                        st.markdown(f"""
+                        **{file_icon} {doc['filename']}**  
+                        📅 Modified: {modified_date} | 📏 Size: {file_size}  
+                        📍 Path: `{doc.get('file_path', 'Unknown')}`
+                        """)
+                        
+                        # Show content preview
+                        content_preview = doc.get('content', '')[:200] + "..." if len(doc.get('content', '')) > 200 else doc.get('content', '')
+                        if content_preview:
+                            with st.expander(f"👁️ Preview - {doc['filename'][:30]}..."):
+                                st.text(content_preview)
+                        
+                        st.markdown("---")
+            
+            # Process selected documents
+            if selected_docs:
+                st.subheader(f"🚀 Process {len(selected_docs)} Selected Documents")
+                
+                # Processing options
+                process_col1, process_col2, process_col3 = st.columns(3)
+                
+                with process_col1:
+                    chunk_size = st.number_input(
+                        "Chunk Size",
+                        min_value=100,
+                        max_value=2000,
+                        value=1000,
+                        key="selected_chunk_size"
+                    )
+                
+                with process_col2:
+                    chunk_overlap = st.number_input(
+                        "Chunk Overlap",
+                        min_value=0,
+                        max_value=500,
+                        value=200,
+                        key="selected_chunk_overlap"
+                    )
+                
+                with process_col3:
+                    st.metric("Documents Selected", len(selected_docs))
+                
+                # Process button
+                if st.button("🔄 Process Selected Documents", type="primary"):
+                    process_selected_documents(
+                        selected_docs, astra_client, document_processor, 
+                        chunk_size, chunk_overlap
+                    )
+        else:
+            st.info("👆 Click 'Browse SharePoint Documents' to see available files")
+    
+    with col2:
+        st.subheader("📤 Manual Upload")
+        
+        # File uploader
+        uploaded_files = st.file_uploader(
+            "Upload Documents",
+            accept_multiple_files=True,
+            type=['pdf', 'docx', 'txt', 'pptx', 'xlsx', 'html', 'md', 'json'],
+            help="Upload individual files for processing",
+            key="manual_upload"
+        )
+        
+        if uploaded_files:
+            st.success(f"📁 {len(uploaded_files)} files uploaded")
+            
+            # Show uploaded files
+            for file in uploaded_files:
+                file_icon = get_file_icon(file.name)
+                st.markdown(f"{file_icon} **{file.name}** ({format_file_size(file.size)})")
+            
+            # Upload processing options
+            upload_col1, upload_col2 = st.columns(2)
+            
+            with upload_col1:
+                upload_chunk_size = st.number_input(
+                    "Chunk Size",
+                    min_value=100,
+                    max_value=2000,
+                    value=1000,
+                    key="upload_chunk_size"
+                )
+            
+            with upload_col2:
+                upload_chunk_overlap = st.number_input(
+                    "Chunk Overlap",
+                    min_value=0,
+                    max_value=500,
+                    value=200,
+                    key="upload_chunk_overlap"
+                )
+            
+            if st.button("📄 Process Uploaded Files", type="primary"):
+                process_uploaded_files(
+                    uploaded_files, astra_client, document_processor,
+                    upload_chunk_size, upload_chunk_overlap
+                )
+        
+        # Collection browser
+        st.subheader("🗂️ Browse Collection")
+        
+        if st.button("👁️ View Stored Documents"):
+            display_collection_browser(astra_client)
+
+def search_query_tab(astra_client):
+    """Enhanced search with document browsing capabilities"""
+    st.header("🔍 Search & Query Documents")
+    
+    # Search interface
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        query = st.text_area(
+            "Enter your question:",
+            placeholder="What information are you looking for?",
+            height=120,
+            key="search_query"
+        )
+        
+        # Quick query suggestions
+        st.markdown("**Quick Queries:**")
+        suggestion_cols = st.columns(3)
+        
+        with suggestion_cols[0]:
+            if st.button("📋 List recent documents", key="query_recent"):
+                st.session_state.search_query = "What are the most recently added documents?"
+                
+        with suggestion_cols[1]:
+            if st.button("📊 Document summary", key="query_summary"):
+                st.session_state.search_query = "Provide a summary of all documents in the collection"
+                
+        with suggestion_cols[2]:
+            if st.button("🔍 Search by topic", key="query_topic"):
+                topic = st.text_input("Enter topic:", key="topic_input")
+                if topic:
+                    st.session_state.search_query = f"Find documents related to {topic}"
+    
+    with col2:
+        st.markdown("### 🎛️ Search Options")
+        
+        similarity_top_k = st.slider(
+            "Results to retrieve",
+            min_value=1,
+            max_value=20,
+            value=5,
+            help="Number of similar documents to retrieve"
+        )
+        
+        response_mode = st.selectbox(
+            "Response Mode",
+            ["compact", "tree_summarize", "simple_summarize", "refine"],
+            index=0,
+            help="How to generate the response from retrieved documents"
+        )
+        
+        include_metadata = st.checkbox(
+            "Include Metadata",
+            value=True,
+            help="Show document metadata in results"
+        )
+        
+        show_scores = st.checkbox(
+            "Show Similarity Scores",
+            value=True,
+            help="Display similarity scores for each result"
+        )
+    
+    # Search button
+    if st.button("🔍 Search", type="primary", key="execute_search", disabled=not query.strip()):
+        if query.strip():
+            search_documents(astra_client, query.strip(), similarity_top_k, response_mode, include_metadata, show_scores)
+    
+    # Collection stats
+    with st.expander("📊 Collection Statistics"):
+        stats = astra_client.get_collection_stats()
+        
+        stats_col1, stats_col2 = st.columns(2)
+        
+        with stats_col1:
+            st.metric("Total Documents", stats.get('document_count', 'Unknown'))
+            st.metric("Collection Status", stats.get('status', 'Unknown').title())
+        
+        with stats_col2:
+            st.metric("Last Updated", format_timestamp(stats.get('last_updated', ''), '%Y-%m-%d %H:%M'))
+            if st.session_state.processing_status:
+                success_rate = create_processing_summary(st.session_state.processing_status)['success_rate']
+                st.metric("Processing Success Rate", f"{success_rate:.1f}%")
+    
+    # Search history
+    if st.session_state.search_history:
+        st.subheader("📚 Search History")
+        
+        for idx, search in enumerate(reversed(st.session_state.search_history[-5:])):  # Last 5
+            with st.expander(f"🕒 {format_timestamp(search['timestamp'], '%H:%M:%S')} - {search['query'][:50]}..."):
+                st.write(f"**Query:** {search['query']}")
+                st.write(f"**Results:** {len(search.get('sources', []))} documents found")
+                if search.get('response'):
+                    st.write(f"**Response:** {search['response'][:200]}...")
+
+def search_documents(astra_client, query, similarity_top_k, response_mode, include_metadata, show_scores):
+    """Execute document search and display results"""
+    search_start_time = datetime.now()
+    
+    with st.spinner("🔍 Searching documents..."):
+        try:
+            # Execute search
+            result = astra_client.search_documents(
+                query=query,
+                top_k=similarity_top_k,
+                response_mode=response_mode
+            )
+            
+            search_time = (datetime.now() - search_start_time).total_seconds()
+            
+            # Display response
+            st.subheader("🎯 Response")
+            
+            response_container = st.container()
+            with response_container:
+                if result.get('response'):
+                    st.markdown(result['response'])
+                else:
+                    st.warning("No response generated. Try adjusting your query or search parameters.")
+            
+            # Display search metadata
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Search Time", f"{search_time:.2f}s")
+            with col2:
+                st.metric("Sources Found", len(result.get('sources', [])))
+            with col3:
+                st.metric("Response Mode", response_mode)
+            
+            # Display sources
+            sources = result.get('sources', [])
+            if sources:
+                st.subheader("📄 Source Documents")
+                
+                for i, source in enumerate(sources):
+                    score_text = f" - Score: {source.get('score', 0):.3f}" if show_scores else ""
+                    filename = source.get('metadata', {}).get('filename', f'Document {i+1}')
+                    
+                    with st.expander(f"📋 Source {i+1}: {filename}{score_text}"):
+                        # Document content
+                        st.markdown("**Content:**")
+                        content = source.get('text', 'No content available')
+                        if len(content) > 500:
+                            st.text(content[:500] + "...")
+                            if st.button(f"Show full content", key=f"show_full_{i}"):
+                                st.text(content)
+                        else:
+                            st.text(content)
+                        
+                        # Metadata
+                        if include_metadata and source.get('metadata'):
+                            st.markdown("**Metadata:**")
+                            metadata = source['metadata']
+                            
+                            # Display key metadata in a more readable format
+                            metadata_cols = st.columns(2)
+                            
+                            with metadata_cols[0]:
+                                if isinstance(metadata, dict):
+                                    for key, value in metadata.items():
+                                        if key in ['filename', 'processed_at', 'source', 'file_size']:
+                                            st.write(f"**{key.replace('_', ' ').title()}:** {value}")
+                            
+                            with metadata_cols[1]:
+                                if isinstance(metadata, dict):
+                                    for key, value in metadata.items():
+                                        if key in ['file_type', 'chunk_size', 'word_count', 'text_length']:
+                                            st.write(f"**{key.replace('_', ' ').title()}:** {value}")
+                        
+                        # Similarity score bar
+                        if show_scores and 'score' in source:
+                            score = source['score']
+                            st.progress(min(score, 1.0))
+            else:
+                st.info("💡 No source documents found. Try adjusting your search query or parameters.")
+            
+            # Add to search history
+            search_record = {
+                'query': query,
+                'response': result.get('response', ''),
+                'sources': sources,
+                'timestamp': datetime.now(),
+                'search_time': search_time,
+                'num_results': len(sources)
+            }
+            
+            st.session_state.search_history.append(search_record)
+            
+            # Limit search history size
+            if len(st.session_state.search_history) > 50:
+                st.session_state.search_history = st.session_state.search_history[-50:]
+                
+        except Exception as e:
+            st.error(f"❌ Search error: {str(e)}")
+            
+            # Add failed search to history
+            search_record = {
+                'query': query,
+                'response': f'Error: {str(e)}',
+                'sources': [],
+                'timestamp': datetime.now(),
+                'search_time': 0,
+                'num_results': 0
+            }
+            
+            st.session_state.search_history.append(search_record)
+
+def monitoring_tab(astra_client, sharepoint_client):
+    """Handle monitoring and analytics tab"""
+    st.header("📊 System Monitoring & Analytics")
+    
+    # System metrics row
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Total Documents",
+            st.session_state.document_count,
+            delta=None
+        )
+    
+    with col2:
+        system_status = "🟢 Healthy" if astra_client and sharepoint_client else "🔴 Issues"
+        st.metric("System Status", system_status)
+    
+    with col3:
+        if st.session_state.last_sync_time:
+            time_diff = calculate_time_diff(st.session_state.last_sync_time)
+            st.metric("Last Sync", time_diff)
+        else:
+            st.metric("Last Sync", "Never")
+    
+    with col4:
+        success_rate = st.session_state.system_stats.get('success_rate', 100)
+        st.metric("Success Rate", f"{success_rate:.1f}%")
+    
+    # Processing analytics
+    if st.session_state.processing_status:
+        st.subheader("📈 Processing Analytics")
+        
+        # Create DataFrame from processing status
+        df = pd.DataFrame(st.session_state.processing_status)
+        
+        if not df.empty and 'timestamp' in df.columns:
+            # Convert timestamp
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df['hour'] = df['timestamp'].dt.floor('H')
+            df['date'] = df['timestamp'].dt.date
+            
+            # Charts row
+            chart_col1, chart_col2 = st.columns(2)
+            
+            with chart_col1:
+                st.markdown("**Documents Processed Over Time**")
+                
+                # Group by hour
+                hourly_data = df.groupby('hour').size().reset_index()
+                hourly_data.columns = ['Hour', 'Count']
+                
+                if not hourly_data.empty:
+                    fig = px.line(
+                        hourly_data,
+                        x='Hour',
+                        y='Count',
+                        title='Documents Processed by Hour'
+                    )
+                    fig.update_layout(height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No data available for time series chart")
+            
+            with chart_col2:
+                st.markdown("**Processing Status Distribution**")
+                
+                # Status distribution
+                if 'status' in df.columns:
+                    status_counts = df['status'].value_counts()
+                    
+                    # Create success/error categories
+                    success_count = sum(count for status, count in status_counts.items() if 'Success' in status)
+                    error_count = sum(count for status, count in status_counts.items() if 'Error' in status)
+                    
+                    status_data = pd.DataFrame({
+                        'Status': ['Success', 'Error'],
+                        'Count': [success_count, error_count]
+                    })
+                    
+                    if not status_data.empty and status_data['Count'].sum() > 0:
+                        fig = px.pie(
+                            status_data,
+                            values='Count',
+                            names='Status',
+                            title='Processing Success Rate',
+                            color_discrete_map={'Success': '#28a745', 'Error': '#dc3545'}
+                        )
+                        fig.update_layout(height=300)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No status data available")
+        
+        # Recent activity table
+        st.subheader("🕒 Recent Activity")
+        
+        recent_activity = df.tail(20).copy() if not df.empty else pd.DataFrame()
+        
+        if not recent_activity.empty:
+            recent_activity = recent_activity.sort_values('timestamp', ascending=False)
+            recent_activity['formatted_time'] = recent_activity['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Display recent activity
+            display_columns = ['filename', 'status', 'formatted_time']
+            if 'source' in recent_activity.columns:
+                display_columns.append('source')
+            if 'chunks' in recent_activity.columns:
+                display_columns.append('chunks')
+            
+            st.dataframe(
+                recent_activity[display_columns].head(10),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'filename': 'File Name',
+                    'status': 'Status',
+                    'formatted_time': 'Timestamp',
+                    'source': 'Source',
+                    'chunks': 'Chunks'
+                }
+            )
+        else:
+            st.info("📝 No recent activity to display")
+    
+    else:
+        st.info("📊 No processing data available yet. Process some documents to see analytics!")
+    
+    # Show auto-sync monitoring if enabled
+    if st.session_state.auto_sync_history:
+        st.subheader("🔄 Auto-Sync Performance")
+        
+        df_sync = pd.DataFrame(st.session_state.auto_sync_history)
+        df_sync['hour'] = pd.to_datetime(df_sync['timestamp']).dt.floor('H')
+        
+        # Chart of documents processed over time by auto-sync
+        chart_data = df_sync.groupby('hour').agg({
+            'processed': 'sum',
+            'documents_found': 'sum'
+        }).reset_index()
+        
+        if not chart_data.empty:
+            fig = px.bar(chart_data, x='hour', y='processed', 
+                        title='Documents Processed by Auto-Sync Over Time')
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # System health section
+    st.subheader("🏥 System Health")
+    
+    health_col1, health_col2 = st.columns(2)
+    
+    with health_col1:
+        st.markdown("**Service Status**")
+        
+        services_status = []
+        
+        # Check Astra DB
+        try:
+            astra_status = astra_client.test_connection() if astra_client else False
+            services_status.append({"Service": "Astra DB", "Status": "✅ Online" if astra_status else "❌ Offline"})
+        except:
+            services_status.append({"Service": "Astra DB", "Status": "❌ Error"})
+        
+        # Check SharePoint
+        try:
+            sp_status = sharepoint_client.test_connection() if sharepoint_client else False
+            services_status.append({"Service": "SharePoint", "Status": "✅ Online" if sp_status else "❌ Offline"})
+        except:
+            services_status.append({"Service": "SharePoint", "Status": "❌ Error"})
+        
+        # Check OpenAI
+        openai_status = bool(os.getenv("OPENAI_API_KEY"))
+        services_status.append({"Service": "OpenAI", "Status": "✅ Configured" if openai_status else "❌ Not Configured"})
+        
+        services_df = pd.DataFrame(services_status)
+        st.dataframe(services_df, hide_index=True, use_container_width=True)
+    
+    with health_col2:
+        st.markdown("**Performance Metrics**")
+        
+        perf_metrics = []
+        perf_metrics.append({"Metric": "Total Documents", "Value": st.session_state.document_count})
+        perf_metrics.append({"Metric": "Success Rate", "Value": f"{st.session_state.system_stats.get('success_rate', 100):.1f}%"})
+        perf_metrics.append({"Metric": "Total Processed", "Value": st.session_state.system_stats.get('total_processed', 0)})
+        
+        if st.session_state.search_history:
+            avg_search_time = sum(s.get('search_time', 0) for s in st.session_state.search_history) / len(st.session_state.search_history)
+            perf_metrics.append({"Metric": "Avg Search Time", "Value": f"{avg_search_time:.2f}s"})
+        
+        perf_df = pd.DataFrame(perf_metrics)
+        st.dataframe(perf_df, hide_index=True, use_container_width=True)
+    
+    # Refresh monitoring data
+    if st.button("🔄 Refresh Monitoring Data", key="refresh_monitoring"):
+        st.rerun()
+
 def auto_sync_interface(astra_client, sharepoint_client, document_processor):
     """Interface for auto-sync settings and controls"""
     st.subheader("🔄 Automatic Sync")
@@ -402,6 +1258,27 @@ def auto_sync_interface(astra_client, sharepoint_client, document_processor):
             with st.spinner("Running scheduled auto-sync..."):
                 run_auto_sync(astra_client, sharepoint_client, document_processor)
         
+        # Sync history
+        if st.session_state.auto_sync_history:
+            with st.expander("📊 Sync History"):
+                history_df = pd.DataFrame(st.session_state.auto_sync_history[-10:])  # Last 10 syncs
+                
+                if not history_df.empty:
+                    history_df['time'] = pd.to_datetime(history_df['timestamp']).dt.strftime('%H:%M:%S')
+                    history_df['result'] = history_df.apply(
+                        lambda row: f"✅ {row.get('processed', 0)} docs" if row['status'] == 'success' else "❌ Error", 
+                        axis=1
+                    )
+                    
+                    display_cols = ['time', 'result', 'documents_found', 'new_files', 'modified_files']
+                    available_cols = [col for col in display_cols if col in history_df.columns]
+                    
+                    st.dataframe(
+                        history_df[available_cols].sort_values('time', ascending=False),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+        
         # Auto-refresh mechanism
         if auto_sync_enabled:
             # Refresh page every 30 seconds to check for due syncs and update countdown
@@ -480,16 +1357,13 @@ def main():
     tab1, tab2, tab3, tab4 = st.tabs(["📥 Data Ingestion", "🔍 Search & Query", "📊 Monitoring", "⚙️ Settings"])
     
     with tab1:
-        st.header("📥 Data Ingestion")
-        st.info("Manual data ingestion functionality - use Settings tab for auto-sync configuration.")
+        data_ingestion_tab(astra_client, sharepoint_client, document_processor)
     
     with tab2:
-        st.header("🔍 Search & Query")
-        st.info("Search functionality will be implemented here.")
+        search_query_tab(astra_client)
     
     with tab3:
-        st.header("📊 Monitoring")
-        st.info("Monitoring dashboard will be implemented here.")
+        monitoring_tab(astra_client, sharepoint_client)
     
     with tab4:
         auto_sync_interface(astra_client, sharepoint_client, document_processor)
