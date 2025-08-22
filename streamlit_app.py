@@ -1,4 +1,4 @@
-# streamlit_app.py
+# streamlit_app.py (Enhanced with Auto-Sync)
 import streamlit as st
 import os
 import pandas as pd
@@ -8,6 +8,7 @@ from typing import List, Dict, Optional
 import json
 import plotly.express as px
 import plotly.graph_objects as go
+import hashlib
 
 # Updated LlamaIndex imports for v0.10+
 try:
@@ -17,7 +18,6 @@ try:
     from llama_index.vector_stores import AstraDBVectorStore
     LLAMA_INDEX_AVAILABLE = True
 except ImportError:
-    # Alternative import structure
     try:
         from llama_index.core import VectorStoreIndex, Document, Settings
         from llama_index.embeddings.openai import OpenAIEmbedding
@@ -26,7 +26,6 @@ except ImportError:
         ServiceContext = None
         LLAMA_INDEX_AVAILABLE = True
     except ImportError:
-        # Fallback - we'll implement basic functionality without LlamaIndex
         VectorStoreIndex = None
         Document = None
         Settings = None
@@ -49,7 +48,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS (same as before)
 st.markdown("""
 <style>
     .main-header {
@@ -67,40 +66,36 @@ st.markdown("""
         margin: 0.5rem 0;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
-    .success-message {
-        background-color: #d4edda;
-        color: #155724;
+    .auto-sync-enabled {
+        background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
+        color: white;
         padding: 1rem;
         border-radius: 8px;
-        border: 1px solid #c3e6cb;
         margin: 1rem 0;
     }
-    .error-message {
-        background-color: #f8d7da;
-        color: #721c24;
+    .auto-sync-disabled {
+        background-color: #f8f9fa;
         padding: 1rem;
         border-radius: 8px;
-        border: 1px solid #f5c6cb;
+        border: 2px dashed #dee2e6;
         margin: 1rem 0;
     }
-    .info-box {
-        background-color: #e7f3ff;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #1f77b4;
-        margin: 1rem 0;
+    .sync-status {
+        font-family: 'Courier New', monospace;
+        background-color: #f1f1f1;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
     }
-    .warning-box {
-        background-color: #fff3cd;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #ffc107;
-        margin: 1rem 0;
+    .countdown-timer {
+        font-size: 1.2em;
+        font-weight: bold;
+        color: #1f77b4;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
+# Initialize session state with auto-sync features
 def init_session_state():
     if 'processing_status' not in st.session_state:
         st.session_state.processing_status = []
@@ -116,91 +111,397 @@ def init_session_state():
             'success_rate': 100,
             'avg_processing_time': 0
         }
+    
+    # Auto-sync specific session state
+    if 'auto_sync_enabled' not in st.session_state:
+        st.session_state.auto_sync_enabled = False
+    if 'sync_interval_minutes' not in st.session_state:
+        st.session_state.sync_interval_minutes = 60  # 1 hour default
+    if 'last_auto_sync_result' not in st.session_state:
+        st.session_state.last_auto_sync_result = None
+    if 'auto_sync_history' not in st.session_state:
+        st.session_state.auto_sync_history = []
+    if 'known_files' not in st.session_state:
+        st.session_state.known_files = {}
 
-@st.cache_resource
-def initialize_services():
-    """Initialize all services and return clients"""
+class ChangeDetector:
+    """Simple change detection for SharePoint documents"""
+    
+    @staticmethod
+    def create_file_fingerprint(doc: Dict) -> str:
+        """Create a fingerprint for a document to detect changes"""
+        fingerprint_data = {
+            'filename': doc.get('filename', ''),
+            'modified': doc.get('modified', ''),
+            'content_length': len(doc.get('content', '')),
+            'file_path': doc.get('file_path', '')
+        }
+        fingerprint_str = json.dumps(fingerprint_data, sort_keys=True)
+        return hashlib.md5(fingerprint_str.encode()).hexdigest()
+    
+    @staticmethod
+    def detect_changes(current_docs: List[Dict], known_files: Dict) -> Dict:
+        """Compare current documents with known files to detect changes"""
+        changes = {
+            'new_files': [],
+            'modified_files': [],
+            'unchanged_files': []
+        }
+        
+        current_fingerprints = {}
+        
+        for doc in current_docs:
+            file_id = doc.get('id') or doc.get('filename', f"doc_{len(current_fingerprints)}")
+            fingerprint = ChangeDetector.create_file_fingerprint(doc)
+            current_fingerprints[file_id] = fingerprint
+            
+            if file_id not in known_files:
+                changes['new_files'].append(doc)
+            elif known_files[file_id] != fingerprint:
+                changes['modified_files'].append(doc)
+            else:
+                changes['unchanged_files'].append(doc)
+        
+        return changes, current_fingerprints
+
+def get_next_sync_time() -> Optional[datetime]:
+    """Calculate when the next sync should occur"""
+    if not st.session_state.auto_sync_enabled or not st.session_state.last_sync_time:
+        return None
+    
+    interval = timedelta(minutes=st.session_state.sync_interval_minutes)
+    return st.session_state.last_sync_time + interval
+
+def should_auto_sync() -> bool:
+    """Check if it's time for an auto-sync"""
+    if not st.session_state.auto_sync_enabled:
+        return False
+    
+    next_sync = get_next_sync_time()
+    if not next_sync:
+        return True  # First sync
+    
+    return datetime.now() >= next_sync
+
+def run_auto_sync(astra_client, sharepoint_client, document_processor):
+    """Run the automatic sync process"""
+    sync_start_time = datetime.now()
+    
     try:
-        # Check if LlamaIndex is available
-        if not LLAMA_INDEX_AVAILABLE:
-            st.warning("⚠️ LlamaIndex not fully available. Some features may be limited.")
-            return None, None, None, False
+        # Calculate how far back to look (sync interval + 1 hour buffer)
+        hours_back = max(1, (st.session_state.sync_interval_minutes // 60) + 1)
         
-        # Initialize LlamaIndex settings
-        if ServiceContext:
-            # For older versions
-            embed_model = OpenAIEmbedding(api_key=os.getenv("OPENAI_API_KEY"))
-            llm = OpenAI(model="gpt-3.5-turbo", api_key=os.getenv("OPENAI_API_KEY"))
-            service_context = ServiceContext.from_defaults(
-                llm=llm,
-                embed_model=embed_model
+        st.info(f"🔄 Auto-sync: Looking for documents modified in the last {hours_back} hours...")
+        
+        # Get recent documents from SharePoint
+        recent_docs = sharepoint_client.get_recent_changes(hours=hours_back)
+        
+        if not recent_docs:
+            sync_result = {
+                'timestamp': sync_start_time,
+                'status': 'success',
+                'documents_found': 0,
+                'new_files': 0,
+                'modified_files': 0,
+                'processed': 0,
+                'errors': 0,
+                'message': 'No new documents found'
+            }
+            st.info("ℹ️ No new documents found during auto-sync")
+        else:
+            # Detect changes
+            changes, new_fingerprints = ChangeDetector.detect_changes(
+                recent_docs, 
+                st.session_state.known_files
             )
-        elif Settings:
-            # For newer versions
-            Settings.llm = OpenAI(
-                model="gpt-3.5-turbo",
-                api_key=os.getenv("OPENAI_API_KEY")
-            )
-            Settings.embed_model = OpenAIEmbedding(
-                api_key=os.getenv("OPENAI_API_KEY")
-            )
+            
+            changed_docs = changes['new_files'] + changes['modified_files']
+            
+            st.info(f"📊 Found {len(changes['new_files'])} new files and {len(changes['modified_files'])} modified files")
+            
+            if changed_docs:
+                # Process only changed documents
+                with st.spinner(f"Processing {len(changed_docs)} changed documents..."):
+                    processed_docs = document_processor.process_sharepoint_documents(changed_docs)
+                    result = astra_client.insert_documents(processed_docs)
+                
+                # Update document count
+                successful = result.get('successful', 0)
+                st.session_state.document_count += successful
+                
+                sync_result = {
+                    'timestamp': sync_start_time,
+                    'status': 'success',
+                    'documents_found': len(recent_docs),
+                    'new_files': len(changes['new_files']),
+                    'modified_files': len(changes['modified_files']),
+                    'processed': successful,
+                    'errors': result.get('failed', 0),
+                    'message': f'Successfully processed {successful} documents'
+                }
+                
+                st.success(f"✅ Auto-sync complete! Processed {successful} documents")
+            else:
+                sync_result = {
+                    'timestamp': sync_start_time,
+                    'status': 'success',
+                    'documents_found': len(recent_docs),
+                    'new_files': 0,
+                    'modified_files': 0,
+                    'processed': 0,
+                    'errors': 0,
+                    'message': 'All documents are up to date'
+                }
+                st.info("ℹ️ All documents are up to date")
+            
+            # Update known files
+            st.session_state.known_files.update(new_fingerprints)
         
-        # Initialize clients
-        astra_client = AstraClient()
-        sharepoint_client = SharePointClient()
-        document_processor = DocumentProcessor()
+        # Update sync time and history
+        st.session_state.last_sync_time = sync_start_time
+        st.session_state.last_auto_sync_result = sync_result
+        st.session_state.auto_sync_history.append(sync_result)
         
-        return astra_client, sharepoint_client, document_processor, True
-        
+        # Keep only last 50 sync records
+        if len(st.session_state.auto_sync_history) > 50:
+            st.session_state.auto_sync_history = st.session_state.auto_sync_history[-50:]
+            
     except Exception as e:
-        st.error(f"Failed to initialize services: {str(e)}")
-        st.info("💡 This might be due to missing API keys or package compatibility issues.")
-        return None, None, None, False
+        error_result = {
+            'timestamp': sync_start_time,
+            'status': 'error',
+            'error': str(e),
+            'message': f'Auto-sync failed: {str(e)}'
+        }
+        
+        st.session_state.last_auto_sync_result = error_result
+        st.session_state.auto_sync_history.append(error_result)
+        
+        st.error(f"❌ Auto-sync failed: {str(e)}")
 
-def check_configuration():
-    """Check if all required environment variables are set"""
-    required_vars = [
-        "OPENAI_API_KEY",
-        "ASTRA_DB_TOKEN", 
-        "ASTRA_DB_ENDPOINT",
-        "SHAREPOINT_CLIENT_ID",
-        "SHAREPOINT_CLIENT_SECRET", 
-        "SHAREPOINT_TENANT_ID",
-        "SHAREPOINT_SITE_NAME"
-    ]
+def auto_sync_interface(astra_client, sharepoint_client, document_processor):
+    """Interface for auto-sync settings and controls"""
+    st.subheader("🔄 Automatic Sync")
     
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    configured_vars = [var for var in required_vars if os.getenv(var)]
+    # Auto-sync toggle
+    col1, col2 = st.columns([2, 1])
     
-    return missing_vars, configured_vars
+    with col1:
+        auto_sync_enabled = st.checkbox(
+            "Enable Automatic Sync",
+            value=st.session_state.auto_sync_enabled,
+            help="Automatically sync SharePoint documents at regular intervals"
+        )
+        st.session_state.auto_sync_enabled = auto_sync_enabled
+    
+    with col2:
+        if auto_sync_enabled:
+            st.markdown('<div class="auto-sync-enabled">✅ Auto-Sync Enabled</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="auto-sync-disabled">⏹️ Auto-Sync Disabled</div>', unsafe_allow_html=True)
+    
+    if auto_sync_enabled:
+        # Sync interval settings
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            sync_interval = st.selectbox(
+                "Sync Interval",
+                options=[15, 30, 60, 120, 180, 360, 720],  # minutes
+                index=2,  # default to 60 minutes
+                format_func=lambda x: f"{x} minutes" if x < 60 else f"{x//60} hour{'s' if x//60 > 1 else ''}",
+                help="How often to check for new/modified documents"
+            )
+            st.session_state.sync_interval_minutes = sync_interval
+        
+        with col2:
+            # Manual sync trigger
+            if st.button("🔄 Run Sync Now", type="primary"):
+                run_auto_sync(astra_client, sharepoint_client, document_processor)
+                st.rerun()
+        
+        # Sync status and timing
+        st.subheader("⏱️ Sync Status")
+        
+        status_col1, status_col2, status_col3 = st.columns(3)
+        
+        with status_col1:
+            if st.session_state.last_sync_time:
+                last_sync_str = st.session_state.last_sync_time.strftime('%H:%M:%S')
+                st.metric("Last Sync", last_sync_str)
+            else:
+                st.metric("Last Sync", "Never")
+        
+        with status_col2:
+            next_sync = get_next_sync_time()
+            if next_sync:
+                next_sync_str = next_sync.strftime('%H:%M:%S')
+                st.metric("Next Sync", next_sync_str)
+                
+                # Countdown timer
+                time_until_sync = next_sync - datetime.now()
+                if time_until_sync.total_seconds() > 0:
+                    minutes_left = int(time_until_sync.total_seconds() // 60)
+                    seconds_left = int(time_until_sync.total_seconds() % 60)
+                    st.markdown(f'<div class="countdown-timer">⏰ {minutes_left}m {seconds_left}s until next sync</div>', 
+                               unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="countdown-timer">⏰ Sync overdue!</div>', unsafe_allow_html=True)
+            else:
+                st.metric("Next Sync", "Pending")
+        
+        with status_col3:
+            if st.session_state.last_auto_sync_result:
+                result = st.session_state.last_auto_sync_result
+                if result['status'] == 'success':
+                    processed = result.get('processed', 0)
+                    st.metric("Last Result", f"{processed} docs processed")
+                else:
+                    st.metric("Last Result", "Error", delta="❌")
+        
+        # Check if auto-sync should run
+        if should_auto_sync():
+            st.warning("⏰ **Auto-sync is due!** The system will sync automatically on next page refresh.")
+            
+            # Auto-trigger sync
+            with st.spinner("Running scheduled auto-sync..."):
+                run_auto_sync(astra_client, sharepoint_client, document_processor)
+        
+        # Sync history
+        if st.session_state.auto_sync_history:
+            with st.expander("📊 Sync History"):
+                history_df = pd.DataFrame(st.session_state.auto_sync_history[-10:])  # Last 10 syncs
+                
+                if not history_df.empty:
+                    history_df['time'] = pd.to_datetime(history_df['timestamp']).dt.strftime('%H:%M:%S')
+                    history_df['result'] = history_df.apply(
+                        lambda row: f"✅ {row.get('processed', 0)} docs" if row['status'] == 'success' else "❌ Error", 
+                        axis=1
+                    )
+                    
+                    display_cols = ['time', 'result', 'documents_found', 'new_files', 'modified_files']
+                    available_cols = [col for col in display_cols if col in history_df.columns]
+                    
+                    st.dataframe(
+                        history_df[available_cols].sort_values('time', ascending=False),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+        
+        # Auto-refresh mechanism
+        if auto_sync_enabled:
+            # Refresh page every 30 seconds to check for due syncs and update countdown
+            time.sleep(30)
+            st.rerun()
+    
+    else:
+        st.info("💡 Enable automatic sync to periodically check for new and modified SharePoint documents.")
 
-def show_package_status():
-    """Show the status of required packages"""
-    st.subheader("📦 Package Status")
+# Update your existing functions to include auto-sync
+def display_sidebar(astra_client, sharepoint_client):
+    """Display sidebar with system status and auto-sync info"""
+    st.sidebar.title("🎛️ Control Panel")
     
-    packages_status = {
-        "Streamlit": True,  # Obviously available since we're running
-        "LlamaIndex": LLAMA_INDEX_AVAILABLE,
-        "OpenAI": bool(os.getenv("OPENAI_API_KEY")),
-        "AstraDB": bool(os.getenv("ASTRA_DB_TOKEN")),
-        "SharePoint": bool(os.getenv("SHAREPOINT_CLIENT_ID")),
-        "Pandas": True,
-        "Plotly": True
-    }
+    # Connection status
+    st.sidebar.markdown("### 🔗 Connection Status")
+    st.sidebar.success("✅ Services Online")
+    
+    # Auto-sync status in sidebar
+    st.sidebar.markdown("### 🔄 Auto-Sync Status")
+    
+    if st.session_state.auto_sync_enabled:
+        st.sidebar.success("✅ Auto-Sync Enabled")
+        
+        # Quick stats
+        interval_str = f"{st.session_state.sync_interval_minutes} min"
+        st.sidebar.metric("Interval", interval_str)
+        
+        if st.session_state.last_sync_time:
+            time_since = calculate_time_diff(st.session_state.last_sync_time)
+            st.sidebar.metric("Last Sync", time_since)
+        
+        # Next sync countdown
+        next_sync = get_next_sync_time()
+        if next_sync:
+            time_until = next_sync - datetime.now()
+            if time_until.total_seconds() > 0:
+                minutes_left = int(time_until.total_seconds() // 60)
+                st.sidebar.metric("Next Sync", f"{minutes_left}m")
+            else:
+                st.sidebar.warning("⏰ Sync Due!")
+    else:
+        st.sidebar.info("⏹️ Auto-Sync Disabled")
+    
+    # Quick stats
+    st.sidebar.markdown("### 📊 Quick Stats")
+    st.sidebar.metric("Documents", st.session_state.document_count)
+    
+    # Quick controls
+    if st.sidebar.button("🔄 Manual Sync"):
+        if astra_client and sharepoint_client:
+            document_processor = DocumentProcessor()
+            run_auto_sync(astra_client, sharepoint_client, document_processor)
+            st.rerun()
+
+# Update your settings tab to include auto-sync
+def settings_tab(astra_client, sharepoint_client):
+    """Enhanced settings tab with auto-sync configuration"""
+    st.header("⚙️ Settings & Configuration")
+    
+    # Auto-sync interface
+    auto_sync_interface(astra_client, sharepoint_client, DocumentProcessor())
+    
+    st.markdown("---")
+    
+    # Existing configuration sections...
+    missing_vars, configured_vars = check_configuration()
     
     col1, col2 = st.columns(2)
     
-    for i, (package, status) in enumerate(packages_status.items()):
-        target_col = col1 if i % 2 == 0 else col2
+    with col1:
+        st.subheader("🔗 Service Configuration")
         
-        with target_col:
-            if status:
-                st.success(f"✅ {package}")
-            else:
-                st.error(f"❌ {package}")
+        # Environment variables status
+        st.markdown("**Environment Variables**")
+        
+        all_vars = [
+            "OPENAI_API_KEY",
+            "ASTRA_DB_TOKEN", 
+            "ASTRA_DB_ENDPOINT",
+            "ASTRA_COLLECTION_NAME",
+            "SHAREPOINT_CLIENT_ID",
+            "SHAREPOINT_CLIENT_SECRET", 
+            "SHAREPOINT_TENANT_ID",
+            "SHAREPOINT_SITE_NAME"
+        ]
+        
+        for var in all_vars:
+            value = os.getenv(var)
+            status = "✅ Set" if value else "❌ Missing"
+            st.write(f"{var}: {status}")
+    
+    with col2:
+        st.subheader("🧪 Connection Testing")
+        
+        col2a, col2b = st.columns(2)
+        
+        with col2a:
+            if st.button("Test All Connections"):
+                test_all_connections(astra_client, sharepoint_client)
+        
+        with col2b:
+            if st.button("Clear Sync History"):
+                st.session_state.auto_sync_history = []
+                st.session_state.known_files = {}
+                st.session_state.last_auto_sync_result = None
+                st.success("✅ Sync history cleared!")
+                st.rerun()
+
+# Keep all your existing functions (data_ingestion_tab, search_query_tab, etc.)
+# Just update the main() function to handle auto-sync
 
 def main():
-    """Main application function"""
+    """Main application function with auto-sync integration"""
     # Initialize session state
     init_session_state()
     
@@ -208,73 +509,22 @@ def main():
     st.markdown('<h1 class="main-header">📚 SharePoint to Astra DB ETL Dashboard</h1>', 
                 unsafe_allow_html=True)
     
-    # Show package status
-    show_package_status()
-    
     # Check configuration
     missing_vars, configured_vars = check_configuration()
     
     if missing_vars:
-        st.markdown('<div class="error-message">', unsafe_allow_html=True)
-        st.markdown(f"**❌ Missing environment variables:** {', '.join(missing_vars)}")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.markdown('<div class="info-box">', unsafe_allow_html=True)
-        st.markdown("**💡 Please configure these in your Render dashboard environment variables.**")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        # Show configuration help
-        with st.expander("📋 Configuration Help"):
-            st.markdown("""
-            **Required Environment Variables:**
-            
-            - `OPENAI_API_KEY`: Your OpenAI API key (get from https://platform.openai.com/api-keys)
-            - `ASTRA_DB_TOKEN`: Your Astra DB token (get from Astra console)
-            - `ASTRA_DB_ENDPOINT`: Your Astra DB endpoint URL
-            - `SHAREPOINT_CLIENT_ID`: SharePoint application client ID
-            - `SHAREPOINT_CLIENT_SECRET`: SharePoint application client secret
-            - `SHAREPOINT_TENANT_ID`: Your SharePoint tenant ID
-            - `SHAREPOINT_SITE_NAME`: Name of your SharePoint site
-            
-            **Optional:**
-            - `ASTRA_COLLECTION_NAME`: Collection name (default: "documents")
-            
-            **How to get SharePoint credentials:**
-            1. Go to Azure Portal → App Registrations
-            2. Create new registration or use existing
-            3. Copy Application (client) ID and Directory (tenant) ID
-            4. Create client secret under "Certificates & secrets"
-            5. Grant SharePoint permissions to your app
-            """)
-        
-        # Show basic configuration interface
-        show_configuration_interface()
+        st.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+        st.info("Please configure these in your Render dashboard environment variables.")
         return
-    
-    # Check if LlamaIndex is available
-    if not LLAMA_INDEX_AVAILABLE:
-        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
-        st.markdown("**⚠️ Warning:** LlamaIndex is not fully available. Running in limited mode.")
-        st.markdown("</div>", unsafe_allow_html=True)
     
     # Initialize services
     astra_client, sharepoint_client, document_processor, services_ok = initialize_services()
     
     if not services_ok:
-        st.markdown('<div class="error-message">', unsafe_allow_html=True)
-        st.markdown("**❌ Failed to initialize services.** Please check your configuration and try again.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        # Show basic troubleshooting
-        show_troubleshooting_interface()
+        st.error("❌ Failed to initialize services. Please check your configuration.")
         return
     
-    # Success - show main interface
-    st.markdown('<div class="success-message">', unsafe_allow_html=True)
-    st.markdown("**✅ All services initialized successfully!** You can now use the full dashboard.")
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Display sidebar
+    # Display sidebar with auto-sync info
     display_sidebar(astra_client, sharepoint_client)
     
     # Main tabs
@@ -296,138 +546,16 @@ def main():
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666; padding: 20px;'>"
-        "📚 SharePoint ETL Dashboard | Built with Streamlit & LlamaIndex | "
+        f"📚 SharePoint ETL Dashboard | Auto-Sync: {'✅ Enabled' if st.session_state.auto_sync_enabled else '⏹️ Disabled'} | "
         f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         "</div>", 
         unsafe_allow_html=True
     )
 
-def show_configuration_interface():
-    """Show basic configuration interface when env vars are missing"""
-    st.subheader("🔧 Configuration Interface")
-    
-    st.info("This interface will help you verify your configuration once environment variables are set.")
-    
-    # Test individual services
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**OpenAI Configuration**")
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
-            if st.button("Test OpenAI Connection"):
-                test_openai_connection()
-        else:
-            st.warning("OPENAI_API_KEY not set")
-    
-    with col2:
-        st.markdown("**Astra DB Configuration**")
-        astra_token = os.getenv("ASTRA_DB_TOKEN")
-        astra_endpoint = os.getenv("ASTRA_DB_ENDPOINT")
-        if astra_token and astra_endpoint:
-            if st.button("Test Astra DB Connection"):
-                test_astra_connection()
-        else:
-            st.warning("Astra DB credentials not set")
-
-def show_troubleshooting_interface():
-    """Show troubleshooting interface when services fail to initialize"""
-    st.subheader("🔧 Troubleshooting")
-    
-    st.markdown("""
-    **Common Issues:**
-    
-    1. **Package Import Errors**: Try redeploying with updated requirements.txt
-    2. **API Key Issues**: Ensure all API keys are valid and have proper permissions
-    3. **Network Issues**: Check if Render can access external APIs
-    4. **Version Conflicts**: Package versions might be incompatible
-    
-    **Quick Tests:**
-    """)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("Test Basic Python Imports"):
-            test_basic_imports()
-    
-    with col2:
-        if st.button("Test Environment Variables"):
-            test_environment_variables()
-
-def test_openai_connection():
-    """Test OpenAI connection"""
-    try:
-        import openai
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": "Hello"}],
-            max_tokens=5
-        )
-        st.success("✅ OpenAI connection successful!")
-    except Exception as e:
-        st.error(f"❌ OpenAI connection failed: {str(e)}")
-
-def test_astra_connection():
-    """Test Astra DB connection"""
-    try:
-        import astrapy
-        client = astrapy.DataAPIClient(os.getenv("ASTRA_DB_TOKEN"))
-        db = client.get_database_by_api_endpoint(os.getenv("ASTRA_DB_ENDPOINT"))
-        st.success("✅ Astra DB connection successful!")
-    except Exception as e:
-        st.error(f"❌ Astra DB connection failed: {str(e)}")
-
-def test_basic_imports():
-    """Test basic Python imports"""
-    import_tests = {
-        "pandas": "import pandas",
-        "numpy": "import numpy", 
-        "plotly": "import plotly",
-        "requests": "import requests",
-        "openai": "import openai"
-    }
-    
-    results = {}
-    for package, import_stmt in import_tests.items():
-        try:
-            exec(import_stmt)
-            results[package] = "✅"
-        except ImportError as e:
-            results[package] = f"❌ {str(e)}"
-    
-    for package, status in results.items():
-        st.write(f"{package}: {status}")
-
-def test_environment_variables():
-    """Test environment variable availability"""
-    required_vars = [
-        "OPENAI_API_KEY",
-        "ASTRA_DB_TOKEN", 
-        "ASTRA_DB_ENDPOINT",
-        "SHAREPOINT_CLIENT_ID",
-        "SHAREPOINT_CLIENT_SECRET", 
-        "SHAREPOINT_TENANT_ID",
-        "SHAREPOINT_SITE_NAME"
-    ]
-    
-    for var in required_vars:
-        value = os.getenv(var)
-        if value:
-            masked_value = f"{value[:8]}..." if len(value) > 8 else value
-            st.write(f"✅ {var}: {masked_value}")
-        else:
-            st.write(f"❌ {var}: Not set")
-
-# Placeholder functions for the main interface
-def display_sidebar(astra_client, sharepoint_client):
-    st.sidebar.title("🎛️ Control Panel")
-    st.sidebar.success("✅ Services Online")
-
+# Add placeholder functions for the tabs you haven't implemented yet
 def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
     st.header("📥 Data Ingestion")
-    st.info("Data ingestion functionality will be implemented here.")
+    st.info("Manual data ingestion functionality - use Settings tab for auto-sync configuration.")
 
 def search_query_tab(astra_client):
     st.header("🔍 Search & Query")
@@ -435,11 +563,50 @@ def search_query_tab(astra_client):
 
 def monitoring_tab(astra_client, sharepoint_client):
     st.header("📊 Monitoring")
-    st.info("Monitoring dashboard will be implemented here.")
+    
+    # Show auto-sync monitoring
+    if st.session_state.auto_sync_history:
+        st.subheader("🔄 Auto-Sync Performance")
+        
+        df = pd.DataFrame(st.session_state.auto_sync_history)
+        df['hour'] = pd.to_datetime(df['timestamp']).dt.floor('H')
+        
+        # Chart of documents processed over time
+        chart_data = df.groupby('hour').agg({
+            'processed': 'sum',
+            'documents_found': 'sum'
+        }).reset_index()
+        
+        if not chart_data.empty:
+            fig = px.bar(chart_data, x='hour', y='processed', 
+                        title='Documents Processed by Auto-Sync Over Time')
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No auto-sync history available yet.")
 
-def settings_tab(astra_client, sharepoint_client):
-    st.header("⚙️ Settings")
-    st.info("Settings panel will be implemented here.")
+def test_all_connections(astra_client, sharepoint_client):
+    st.info("Testing all connections...")
+    # Add your connection testing logic here
+
+def check_configuration():
+    required_vars = [
+        "OPENAI_API_KEY", "ASTRA_DB_TOKEN", "ASTRA_DB_ENDPOINT",
+        "SHAREPOINT_CLIENT_ID", "SHAREPOINT_CLIENT_SECRET", 
+        "SHAREPOINT_TENANT_ID", "SHAREPOINT_SITE_NAME"
+    ]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    configured_vars = [var for var in required_vars if os.getenv(var)]
+    return missing_vars, configured_vars
+
+def initialize_services():
+    try:
+        astra_client = AstraClient()
+        sharepoint_client = SharePointClient()
+        document_processor = DocumentProcessor()
+        return astra_client, sharepoint_client, document_processor, True
+    except Exception as e:
+        st.error(f"Failed to initialize services: {str(e)}")
+        return None, None, None, False
 
 if __name__ == "__main__":
     main()
