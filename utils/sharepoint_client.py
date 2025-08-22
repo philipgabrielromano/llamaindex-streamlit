@@ -6,7 +6,16 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import json
 
-from llama_index.readers.sharepoint import SharePointReader
+# Updated import for SharePoint
+try:
+    from llama_index.readers.microsoft_sharepoint import SharePointReader
+except ImportError:
+    # Fallback for different package structure
+    try:
+        from llama_index.readers.sharepoint import SharePointReader
+    except ImportError:
+        SharePointReader = None
+        st.error("SharePoint reader not available. Please check package installation.")
 
 class SharePointClient:
     """Handles SharePoint integration and document retrieval"""
@@ -21,11 +30,15 @@ class SharePointClient:
             raise ValueError("Missing required SharePoint configuration")
         
         self.reader = None
-        self._initialize_reader()
+        if SharePointReader:
+            self._initialize_reader()
     
     def _initialize_reader(self):
         """Initialize SharePoint reader"""
         try:
+            if not SharePointReader:
+                raise Exception("SharePoint reader not available")
+                
             self.reader = SharePointReader(
                 client_id=self.client_id,
                 client_secret=self.client_secret,
@@ -61,16 +74,19 @@ class SharePointClient:
                 raise Exception("SharePoint reader not initialized")
             
             # Set up file extractor for specified types
-            file_extractor = {}
+            file_extractor = None
             if file_types:
+                file_extractor = {}
                 for ext in file_types:
+                    if not ext.startswith('.'):
+                        ext = f'.{ext}'
                     file_extractor[ext] = "default"
             
-            # Load documents
+            # Load documents with proper parameters
             documents = self.reader.load_data(
                 sharepoint_site_name=self.site_name,
                 sharepoint_folder_path=folder_path,
-                file_extractor=file_extractor if file_extractor else None,
+                file_extractor=file_extractor,
                 recursive=True
             )
             
@@ -79,18 +95,31 @@ class SharePointClient:
             for doc in documents:
                 doc_info = {
                     'content': doc.text,
-                    'filename': doc.metadata.get('filename', 'Unknown'),
-                    'file_path': doc.metadata.get('file_path', ''),
-                    'modified': doc.metadata.get('last_modified', datetime.now().isoformat()),
-                    'id': doc.metadata.get('id', ''),
+                    'filename': doc.metadata.get('filename', doc.metadata.get('file_name', 'Unknown')),
+                    'file_path': doc.metadata.get('file_path', doc.metadata.get('source', '')),
+                    'modified': doc.metadata.get('last_modified', doc.metadata.get('modified', datetime.now().isoformat())),
+                    'id': doc.metadata.get('id', doc.metadata.get('doc_id', '')),
                     'metadata': doc.metadata
                 }
                 
                 # Filter by date if specified
                 if since_date:
-                    doc_modified = datetime.fromisoformat(doc_info['modified'].replace('Z', '+00:00'))
-                    if doc_modified < since_date:
-                        continue
+                    try:
+                        doc_modified_str = doc_info['modified']
+                        if isinstance(doc_modified_str, str):
+                            # Handle different date formats
+                            if 'T' in doc_modified_str:
+                                doc_modified = datetime.fromisoformat(doc_modified_str.replace('Z', '+00:00'))
+                            else:
+                                doc_modified = datetime.fromisoformat(doc_modified_str)
+                        else:
+                            doc_modified = doc_modified_str
+                        
+                        if doc_modified < since_date:
+                            continue
+                    except Exception:
+                        # If date parsing fails, include the document
+                        pass
                 
                 doc_list.append(doc_info)
             
@@ -125,6 +154,7 @@ class SharePointClient:
             'client_secret': bool(self.client_secret),
             'tenant_id': bool(self.tenant_id),
             'site_name': bool(self.site_name),
+            'reader_available': SharePointReader is not None,
             'reader_initialized': bool(self.reader)
         }
         
