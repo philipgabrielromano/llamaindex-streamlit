@@ -138,137 +138,187 @@ class SharePointClient:
             st.error(f"❌ SharePoint connection test failed: {str(e)}")
             return False
     
-    def get_documents(self, folder_path: str = "Documents", 
-                     file_types: List[str] = None, 
-                     since_date: Optional[datetime] = None,
-                     max_docs: Optional[int] = None) -> List[Dict]:
-        """Get documents from SharePoint - using correct library names"""
-        import streamlit as st
+   def get_documents(self, folder_path: str = "Documents", 
+                 file_types: List[str] = None, 
+                 since_date: Optional[datetime] = None,
+                 max_docs: Optional[int] = None) -> List[Dict]:
+    """Get documents from SharePoint with detailed debugging"""
+    import streamlit as st
+    
+    if not OFFICE365_AVAILABLE or not self.ctx:
+        st.warning("⚠️ SharePoint client not available. Using mock data.")
+        return self._get_mock_documents()
+    
+    try:
+        st.info(f"📂 Loading documents from: {folder_path}")
         
-        if not OFFICE365_AVAILABLE or not self.ctx:
-            st.warning("⚠️ SharePoint client not available. Using mock data.")
-            return self._get_mock_documents()
+        # Clean up the folder path - use just the library name
+        library_name = folder_path.replace("/", "").replace("Shared Documents", "Documents")
         
+        # Ensure we're using a library that exists
+        available_libs = ["Documents", "Form Templates", "Site Assets", "Style Library", "Teams Wiki Data"]
+        if library_name not in available_libs:
+            library_name = "Documents"  # Default to Documents
+            st.info(f"📁 Using default library: {library_name}")
+        
+        # Get document library
         try:
-            st.info(f"📂 Loading documents from: {folder_path}")
+            library = self.ctx.web.lists.get_by_title(library_name)
+            items = library.items
+            self.ctx.load(items)
+            self.ctx.execute_query()
             
-            # Use the library name directly (no path prefix)
-            library_name = folder_path.replace("/", "").replace("Shared Documents", "Documents")
+            st.success(f"✅ Successfully connected to '{library_name}' library with {len(items)} items")
             
-            # Get document library
-            try:
-                library = self.ctx.web.lists.get_by_title(library_name)
-                items = library.items
-                self.ctx.load(items)
-                self.ctx.execute_query()
-                
-                st.success(f"✅ Successfully connected to '{library_name}' library with {len(items)} items")
-                
-            except Exception as lib_error:
-                st.error(f"❌ Could not access library '{library_name}': {str(lib_error)}")
-                
-                # Try alternative library names
-                alternative_libraries = ["Documents", "Site Assets", "Teams Wiki Data"]
-                for alt_lib in alternative_libraries:
-                    try:
-                        st.info(f"🔄 Trying alternative library: {alt_lib}")
-                        library = self.ctx.web.lists.get_by_title(alt_lib)
-                        items = library.items
-                        self.ctx.load(items)
-                        self.ctx.execute_query()
-                        
-                        st.success(f"✅ Successfully connected to '{alt_lib}' library")
-                        library_name = alt_lib
-                        break
-                        
-                    except:
-                        continue
-                else:
-                    st.error("❌ Could not access any document library")
-                    return self._get_mock_documents()
-            
-            # Process documents
-            documents = []
-            processed_count = 0
-            
-            for item in items:
-                try:
-                    # Extract item properties
-                    props = item.properties
-                    filename = props.get('FileLeafRef', f'Document_{processed_count}')
-                    
-                    # Skip folders and system files
-                    if not filename or filename.startswith('.') or 'FolderChildCount' in props:
-                        continue
-                    
-                    # Filter by file type if specified
-                    if file_types:
-                        file_ext = f".{filename.split('.')[-1].lower()}" if '.' in filename else ''
-                        if file_ext not in file_types:
-                            continue
-                    
-                    # Extract metadata
-                    modified_str = props.get('Modified', datetime.now().isoformat())
-                    file_path = props.get('FileRef', '')
-                    item_id = props.get('ID', f'item_{processed_count}')
-                    file_size = props.get('File_x0020_Size', 0)
-                    
-                    # Filter by date if specified
-                    if since_date:
-                        try:
-                            if isinstance(modified_str, str):
-                                modified_dt = datetime.fromisoformat(modified_str.replace('Z', '+00:00'))
-                            else:
-                                modified_dt = modified_str
-                            
-                            if modified_dt < since_date:
-                                continue
-                        except Exception:
-                            pass  # Include document if date parsing fails
-                    
-                    # Get file content
-                    content = self._get_file_content(file_path, filename)
-                    
-                    # Create document info
-                    doc_info = {
-                        'id': item_id,
-                        'filename': filename,
-                        'content': content,
-                        'modified': modified_str,
-                        'file_path': file_path,
-                        'metadata': {
-                            'sharepoint_id': item_id,
-                            'file_size': file_size,
-                            'created': props.get('Created', ''),
-                            'author': self._extract_author(props.get('Author', {})),
-                            'source': 'sharepoint_live',
-                            'site_url': self.site_url,
-                            'library': library_name,
-                            'processed_at': datetime.now().isoformat(),
-                            'text_length': len(content),
-                            'word_count': len(content.split()) if content else 0
-                        }
-                    }
-                    
-                    documents.append(doc_info)
-                    processed_count += 1
-                    
-                    # Apply max docs limit
-                    if max_docs and processed_count >= max_docs:
-                        st.info(f"📊 Reached maximum document limit: {max_docs}")
-                        break
-                        
-                except Exception as item_error:
-                    st.warning(f"Error processing item: {str(item_error)}")
-                    continue
-            
-            st.success(f"✅ Successfully loaded {len(documents)} documents from SharePoint")
-            return documents
-            
-        except Exception as e:
-            st.error(f"❌ Error retrieving SharePoint documents: {str(e)}")
-            st.info("🔄 Falling back to mock data")
+        except Exception as lib_error:
+            st.error(f"❌ Could not access library '{library_name}': {str(lib_error)}")
             return self._get_mock_documents()
+        
+        # Debug: Show what we found
+        st.info(f"🔍 Processing {len(items)} items from library...")
+        
+        # Process documents with detailed logging
+        documents = []
+        processed_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        # Debug counters
+        folder_count = 0
+        system_file_count = 0
+        type_filtered_count = 0
+        date_filtered_count = 0
+        
+        for item in items:
+            try:
+                # Extract item properties
+                props = item.properties
+                filename = props.get('FileLeafRef', f'Document_{processed_count}')
+                
+                # Debug: Check what type of item this is
+                item_type = props.get('ContentType', {})
+                if isinstance(item_type, dict):
+                    content_type = item_type.get('Name', 'Unknown')
+                else:
+                    content_type = str(item_type)
+                
+                # Check if it's a folder
+                folder_child_count = props.get('FolderChildCount')
+                if folder_child_count is not None:
+                    folder_count += 1
+                    continue  # Skip folders
+                
+                # Skip system files
+                if not filename or filename.startswith('.') or filename.startswith('_'):
+                    system_file_count += 1
+                    continue
+                
+                # Debug: Show file details
+                st.write(f"📄 Found: {filename} (Type: {content_type})")
+                
+                # Filter by file type if specified
+                if file_types:
+                    file_ext = f".{filename.split('.')[-1].lower()}" if '.' in filename else ''
+                    if file_ext not in file_types:
+                        type_filtered_count += 1
+                        st.write(f"   ⏭️ Skipped: {filename} (type {file_ext} not in filter)")
+                        continue
+                
+                # Extract metadata
+                modified_str = props.get('Modified', datetime.now().isoformat())
+                file_path = props.get('FileRef', '')
+                item_id = props.get('ID', f'item_{processed_count}')
+                file_size = props.get('File_x0020_Size', 0)
+                
+                # Filter by date if specified
+                if since_date:
+                    try:
+                        if isinstance(modified_str, str):
+                            modified_dt = datetime.fromisoformat(modified_str.replace('Z', '+00:00'))
+                        else:
+                            modified_dt = modified_str
+                        
+                        if modified_dt < since_date:
+                            date_filtered_count += 1
+                            st.write(f"   ⏭️ Skipped: {filename} (too old: {modified_dt})")
+                            continue
+                    except Exception as date_error:
+                        st.write(f"   ⚠️ Date parsing failed for {filename}: {date_error}")
+                        pass  # Include document if date parsing fails
+                
+                # Get file content
+                content = self._get_file_content(file_path, filename)
+                
+                # Create document info
+                doc_info = {
+                    'id': item_id,
+                    'filename': filename,
+                    'content': content,
+                    'modified': modified_str,
+                    'file_path': file_path,
+                    'metadata': {
+                        'sharepoint_id': item_id,
+                        'file_size': file_size,
+                        'created': props.get('Created', ''),
+                        'author': self._extract_author(props.get('Author', {})),
+                        'source': 'sharepoint_live',
+                        'site_url': self.site_url,
+                        'library': library_name,
+                        'processed_at': datetime.now().isoformat(),
+                        'content_type': content_type,
+                        'text_length': len(content),
+                        'word_count': len(content.split()) if content else 0
+                    }
+                }
+                
+                documents.append(doc_info)
+                processed_count += 1
+                st.write(f"   ✅ Added: {filename}")
+                
+                # Apply max docs limit
+                if max_docs and processed_count >= max_docs:
+                    st.info(f"📊 Reached maximum document limit: {max_docs}")
+                    break
+                    
+            except Exception as item_error:
+                error_count += 1
+                st.write(f"   ❌ Error processing item: {str(item_error)}")
+                continue
+        
+        # Show detailed summary
+        st.info(f"""
+        📊 **Processing Summary:**
+        - Total items found: {len(items)}
+        - Folders skipped: {folder_count}
+        - System files skipped: {system_file_count}
+        - Type filtered: {type_filtered_count}
+        - Date filtered: {date_filtered_count}
+        - Errors: {error_count}
+        - **Documents processed: {len(documents)}**
+        """)
+        
+        if len(documents) == 0:
+            st.warning("⚠️ No documents were processed. Check your filters:")
+            if file_types:
+                st.write(f"   File type filter: {file_types}")
+            if since_date:
+                st.write(f"   Date filter: Since {since_date}")
+            
+            # Show what file types are available
+            all_filenames = [props.get('FileLeafRef', '') for item in items for props in [item.properties] if props.get('FileLeafRef')]
+            file_extensions = set([f".{name.split('.')[-1].lower()}" for name in all_filenames if '.' in name])
+            
+            if file_extensions:
+                st.info(f"📋 Available file types in library: {', '.join(sorted(file_extensions))}")
+            
+            st.info("💡 Try removing file type filters or adjusting date range")
+        
+        return documents
+        
+    except Exception as e:
+        st.error(f"❌ Error retrieving SharePoint documents: {str(e)}")
+        st.info("🔄 Falling back to mock data")
+        return self._get_mock_documents()
     
     def _get_file_content(self, file_path: str, filename: str) -> str:
         """Get content from a SharePoint file"""
