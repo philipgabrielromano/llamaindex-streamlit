@@ -1,4 +1,5 @@
 # utils/document_processor.py
+# utils/document_processor.py (Updated imports)
 import streamlit as st
 import hashlib
 import mimetypes
@@ -6,11 +7,28 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import PyPDF2
 import docx
+import pandas as pd
 import io
 from pathlib import Path
+import json
+
+# Try to import additional libraries
+try:
+    import pptx
+    PPTX_AVAILABLE = True
+except ImportError:
+    PPTX_AVAILABLE = False
+
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
 
 from llama_index.core import Document
 from llama_index.core.text_splitter import RecursiveCharacterTextSplitter
+
+# Rest of your DocumentProcessor class remains the same...
 
 class DocumentProcessor:
     """Handles document processing, chunking, and text extraction"""
