@@ -1,4 +1,4 @@
-# utils/document_processor.py (Fixed without LlamaIndex text splitter)
+# utils/document_processor.py (Without BeautifulSoup dependency)
 import streamlit as st
 import hashlib
 import mimetypes
@@ -19,12 +19,6 @@ try:
     PPTX_AVAILABLE = True
 except ImportError:
     PPTX_AVAILABLE = False
-
-try:
-    from bs4 import BeautifulSoup
-    BS4_AVAILABLE = True
-except ImportError:
-    BS4_AVAILABLE = False
 
 # Simple Document class if LlamaIndex isn't available
 class SimpleDocument:
@@ -93,7 +87,7 @@ class SimpleTextSplitter:
         return [chunk for chunk in chunks if chunk.strip()]
 
 class DocumentProcessor:
-    """Enhanced document processor without LlamaIndex text splitter dependency"""
+    """Enhanced document processor without problematic dependencies"""
     
     # Define supported file types and their processors
     SUPPORTED_TYPES = {
@@ -106,8 +100,7 @@ class DocumentProcessor:
         'json': 'JSON Files',
         'xml': 'XML Files',
         'pptx': 'PowerPoint Presentations',
-        'xlsx': 'Excel Spreadsheets',
-        'rtf': 'Rich Text Format'
+        'xlsx': 'Excel Spreadsheets'
     }
     
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
@@ -214,7 +207,7 @@ class DocumentProcessor:
             elif file_type == 'md':
                 return self._extract_markdown_text(content)
             elif file_type == 'html':
-                return self._extract_html_text(content)
+                return self._extract_html_text_simple(content)
             elif file_type == 'csv':
                 return self._extract_csv_text(content)
             elif file_type == 'json':
@@ -318,22 +311,31 @@ class DocumentProcessor:
         except Exception as e:
             raise Exception(f"Markdown extraction failed: {str(e)}")
     
-    def _extract_html_text(self, content: bytes) -> str:
-        """Extract text from HTML content"""
+    def _extract_html_text_simple(self, content: bytes) -> str:
+        """Extract text from HTML content without BeautifulSoup"""
         try:
             html_content = content.decode('utf-8', errors='ignore')
             
-            if BS4_AVAILABLE:
-                soup = BeautifulSoup(html_content, 'html.parser')
-                # Remove script and style elements
-                for script in soup(["script", "style"]):
-                    script.decompose()
-                return soup.get_text(separator='\n', strip=True)
-            else:
-                # Basic HTML tag removal
-                text = re.sub(r'<[^>]+>', '', html_content)
-                text = re.sub(r'&[a-zA-Z0-9#]+;', ' ', text)  # Remove HTML entities
-                return text.strip()
+            # Simple HTML tag removal using regex
+            # Remove script and style content
+            html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+            html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+            
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', ' ', html_content)
+            
+            # Clean up HTML entities
+            text = text.replace('&nbsp;', ' ')
+            text = text.replace('&amp;', '&')
+            text = text.replace('&lt;', '<')
+            text = text.replace('&gt;', '>')
+            text = text.replace('&quot;', '"')
+            text = text.replace('&#39;', "'")
+            
+            # Clean up whitespace
+            text = re.sub(r'\s+', ' ', text)
+            
+            return text.strip()
                 
         except Exception as e:
             raise Exception(f"HTML extraction failed: {str(e)}")
