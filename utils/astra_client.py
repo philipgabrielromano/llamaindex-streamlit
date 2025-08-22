@@ -1,4 +1,5 @@
 # utils/astra_client.py
+# utils/astra_client.py (Updated imports)
 import streamlit as st
 import os
 from typing import List, Dict, Optional
@@ -6,6 +7,8 @@ from datetime import datetime
 
 from llama_index.core import VectorStoreIndex, Document
 from llama_index.vector_stores.astra_db import AstraDBVectorStore
+
+# Rest of your AstraClient class remains the same...
 
 class AstraClient:
     """Handles Astra DB vector store operations"""
