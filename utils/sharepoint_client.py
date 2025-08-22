@@ -1,39 +1,28 @@
-# utils/sharepoint_client.py (Fixed with better fallback)
+# utils/sharepoint_client.py (Pure Office365 REST client implementation)
 import streamlit as st
 import os
 import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import json
+import io
 
-# Try multiple SharePoint reader import paths
-SHAREPOINT_AVAILABLE = False
-SharePointReader = None
-
-# Try different import paths
-import_attempts = [
-    "llama_index.readers.microsoft_sharepoint",
-    "llama_index_readers_microsoft_sharepoint", 
-    "llama_index.readers.sharepoint",
-    "llama_index_readers_sharepoint"
-]
-
-for import_path in import_attempts:
-    try:
-        module = __import__(import_path, fromlist=['SharePointReader'])
-        SharePointReader = getattr(module, 'SharePointReader', None)
-        if SharePointReader:
-            SHAREPOINT_AVAILABLE = True
-            st.success(f"✅ SharePoint reader loaded from: {import_path}")
-            break
-    except ImportError:
-        continue
-
-if not SHAREPOINT_AVAILABLE:
-    st.warning("⚠️ SharePoint reader not available. Install with: pip install llama-index-readers-microsoft-sharepoint")
+# Use Office365 REST client directly instead of LlamaIndex
+try:
+    from office365.runtime.auth.client_credential import ClientCredential
+    from office365.sharepoint.client_context import ClientContext
+    from office365.sharepoint.files.file import File
+    OFFICE365_AVAILABLE = True
+    st.success("✅ Office365 REST client available")
+except ImportError:
+    OFFICE365_AVAILABLE = False
+    ClientCredential = None
+    ClientContext = None
+    File = None
+    st.warning("⚠️ Office365 REST client not available")
 
 class SharePointClient:
-    """Handles SharePoint integration with fallback for missing reader"""
+    """Direct SharePoint integration using Office365 REST client"""
     
     def __init__(self):
         self.client_id = os.getenv("SHAREPOINT_CLIENT_ID")
@@ -41,48 +30,63 @@ class SharePointClient:
         self.tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
         self.site_name = os.getenv("SHAREPOINT_SITE_NAME")
         
+        # Extract tenant name from tenant_id or site_name
+        self.tenant_name = self._extract_tenant_name()
+        
         if not all([self.client_id, self.client_secret, self.tenant_id, self.site_name]):
             st.warning("⚠️ Missing SharePoint configuration. Please set environment variables.")
-            self.reader = None
+            self.ctx = None
             return
         
-        self.reader = None
-        if SHAREPOINT_AVAILABLE and SharePointReader:
-            self._initialize_reader()
+        self.site_url = f"https://{self.tenant_name}.sharepoint.com/sites/{self.site_name}"
+        self.ctx = None
+        
+        if OFFICE365_AVAILABLE:
+            self._initialize_client()
         else:
-            st.info("💡 SharePoint reader not available. You can still test other features.")
+            st.info("💡 Office365 REST client not available. Using mock data for testing.")
     
-    def _initialize_reader(self):
-        """Initialize SharePoint reader"""
+    def _extract_tenant_name(self):
+        """Extract tenant name from configuration"""
+        # If site_name looks like a full URL, extract tenant
+        if self.site_name and 'sharepoint.com' in self.site_name:
+            parts = self.site_name.split('.')
+            return parts[0].replace('https://', '')
+        
+        # Use a default or ask user to configure
+        return os.getenv("SHAREPOINT_TENANT_NAME", "your-tenant")
+    
+    def _initialize_client(self):
+        """Initialize SharePoint client context"""
         try:
-            if not SharePointReader:
-                raise Exception("SharePoint reader not available")
+            if not OFFICE365_AVAILABLE:
+                return
                 
-            self.reader = SharePointReader(
-                client_id=self.client_id,
-                client_secret=self.client_secret,
-                tenant_id=self.tenant_id
-            )
-            st.success("✅ SharePoint reader initialized successfully!")
+            credentials = ClientCredential(self.client_id, self.client_secret)
+            self.ctx = ClientContext(self.site_url).with_credentials(credentials)
+            
+            st.success(f"✅ SharePoint client initialized for: {self.site_url}")
         except Exception as e:
-            st.error(f"Failed to initialize SharePoint reader: {str(e)}")
-            self.reader = None
+            st.error(f"Failed to initialize SharePoint client: {str(e)}")
+            self.ctx = None
     
     def test_connection(self) -> bool:
         """Test SharePoint connection"""
-        if not self.reader:
-            st.warning("⚠️ SharePoint reader not available for connection test")
+        if not OFFICE365_AVAILABLE:
+            st.warning("⚠️ Office365 client not available for connection test")
             return self._test_basic_config()
         
+        if not self.ctx:
+            st.error("❌ SharePoint client not initialized")
+            return False
+        
         try:
-            # Try to load a minimal set of documents to test connection
-            test_docs = self.reader.load_data(
-                sharepoint_site_name=self.site_name,
-                sharepoint_folder_path="/Shared Documents",
-                recursive=False
-            )
+            # Try to access the web to test connection
+            web = self.ctx.web
+            self.ctx.load(web)
+            self.ctx.execute_query()
             
-            st.success(f"✅ SharePoint connection successful! Found {len(test_docs)} documents in test.")
+            st.success(f"✅ SharePoint connection successful! Site: {web.title}")
             return True
             
         except Exception as e:
@@ -90,7 +94,7 @@ class SharePointClient:
             if "401" in error_msg or "Unauthorized" in error_msg:
                 st.error("❌ SharePoint authentication failed. Check your client credentials.")
             elif "404" in error_msg or "Not Found" in error_msg:
-                st.error(f"❌ SharePoint site '{self.site_name}' not found. Check your site name.")
+                st.error(f"❌ SharePoint site not found. Check your site URL: {self.site_url}")
             elif "403" in error_msg or "Forbidden" in error_msg:
                 st.error("❌ SharePoint access denied. Check your app permissions.")
             else:
@@ -98,188 +102,226 @@ class SharePointClient:
             return False
     
     def _test_basic_config(self) -> bool:
-        """Test basic configuration without SharePoint reader"""
-        config_ok = all([self.client_id, self.client_secret, self.tenant_id, self.site_name])
+        """Test basic configuration without full client"""
+        config_items = [
+            ("Client ID", self.client_id),
+            ("Client Secret", self.client_secret),
+            ("Tenant ID", self.tenant_id), 
+            ("Site Name", self.site_name),
+            ("Tenant Name", self.tenant_name)
+        ]
         
-        if config_ok:
-            st.info("✅ SharePoint configuration appears complete (reader not available for full test)")
+        missing = [name for name, value in config_items if not value]
+        
+        if missing:
+            st.error(f"❌ Missing configuration: {', '.join(missing)}")
+            return False
         else:
-            st.error("❌ SharePoint configuration incomplete")
-        
-        return config_ok
+            st.info("✅ SharePoint configuration appears complete")
+            st.info(f"🔗 Target URL: {self.site_url}")
+            return True
     
-    def get_documents(self, folder_path: str = "/Shared Documents", 
+    def get_documents(self, folder_path: str = "Shared Documents", 
                      file_types: List[str] = None, 
                      since_date: Optional[datetime] = None,
                      max_docs: Optional[int] = None) -> List[Dict]:
         """Get documents from SharePoint"""
         
-        if not self.reader:
-            st.warning("⚠️ SharePoint reader not available. Returning mock data for testing.")
+        if not OFFICE365_AVAILABLE or not self.ctx:
+            st.warning("⚠️ SharePoint client not available. Returning mock data for testing.")
             return self._get_mock_documents()
         
         try:
-            # Set up file extractor for specified types
-            file_extractor = None
-            if file_types:
-                file_extractor = {}
-                for ext in file_types:
-                    if not ext.startswith('.'):
-                        ext = f'.{ext}'
-                    file_extractor[ext] = "default"
-            
             st.info(f"📂 Loading documents from: {folder_path}")
-            if file_types:
-                st.info(f"🔍 Filtering for file types: {', '.join(file_types)}")
             
-            # Load documents with proper parameters
-            documents = self.reader.load_data(
-                sharepoint_site_name=self.site_name,
-                sharepoint_folder_path=folder_path,
-                file_extractor=file_extractor,
-                recursive=True
-            )
+            # Get document library
+            lists = self.ctx.web.lists
+            self.ctx.load(lists)
+            self.ctx.execute_query()
             
-            st.info(f"📄 Loaded {len(documents)} raw documents from SharePoint")
+            # Find the document library
+            target_list = None
+            for lst in lists:
+                if lst.properties['Title'] == folder_path or lst.properties['Title'] == folder_path.replace('/', ''):
+                    target_list = lst
+                    break
             
-            # Process documents (same as before)
-            return self._process_documents(documents, since_date, max_docs)
+            if not target_list:
+                st.error(f"❌ Document library '{folder_path}' not found")
+                return []
+            
+            # Get items from the library
+            items = target_list.items
+            self.ctx.load(items)
+            self.ctx.execute_query()
+            
+            documents = []
+            processed_count = 0
+            
+            for item in items:
+                try:
+                    # Extract item properties
+                    props = item.properties
+                    filename = props.get('FileLeafRef', f'Document_{processed_count}')
+                    
+                    # Filter by file type if specified
+                    if file_types:
+                        file_ext = f".{filename.split('.')[-1].lower()}" if '.' in filename else ''
+                        if file_ext not in file_types:
+                            continue
+                    
+                    # Extract metadata
+                    modified_str = props.get('Modified', datetime.now().isoformat())
+                    file_path = props.get('FileRef', '')
+                    item_id = props.get('ID', f'item_{processed_count}')
+                    
+                    # Filter by date if specified
+                    if since_date:
+                        try:
+                            if isinstance(modified_str, str):
+                                modified_dt = datetime.fromisoformat(modified_str.replace('Z', '+00:00'))
+                            else:
+                                modified_dt = modified_str
+                            
+                            if modified_dt < since_date:
+                                continue
+                        except Exception:
+                            pass  # Include document if date parsing fails
+                    
+                    # Get file content
+                    content = self._get_file_content(file_path, filename)
+                    
+                    # Create document info
+                    doc_info = {
+                        'id': item_id,
+                        'filename': filename,
+                        'content': content,
+                        'modified': modified_str,
+                        'file_path': file_path,
+                        'metadata': {
+                            'sharepoint_id': item_id,
+                            'file_size': props.get('File_x0020_Size', 0),
+                            'created': props.get('Created', ''),
+                            'author': props.get('Author', {}).get('Title', 'Unknown') if isinstance(props.get('Author'), dict) else str(props.get('Author', 'Unknown')),
+                            'source': 'sharepoint_direct',
+                            'site_url': self.site_url,
+                            'library': folder_path,
+                            'processed_at': datetime.now().isoformat(),
+                            'text_length': len(content),
+                            'word_count': len(content.split()) if content else 0
+                        }
+                    }
+                    
+                    documents.append(doc_info)
+                    processed_count += 1
+                    
+                    # Apply max docs limit
+                    if max_docs and processed_count >= max_docs:
+                        st.info(f"📊 Reached maximum document limit: {max_docs}")
+                        break
+                        
+                except Exception as item_error:
+                    st.warning(f"Error processing item: {str(item_error)}")
+                    continue
+            
+            st.success(f"✅ Successfully loaded {len(documents)} documents from SharePoint")
+            return documents
             
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg:
                 st.error("❌ SharePoint authentication failed. Check your credentials.")
             elif "404" in error_msg:
-                st.error(f"❌ SharePoint folder '{folder_path}' not found.")
+                st.error(f"❌ SharePoint library '{folder_path}' not found.")
             elif "403" in error_msg:
-                st.error("❌ Access denied to SharePoint folder. Check permissions.")
+                st.error("❌ Access denied to SharePoint library. Check permissions.")
             else:
                 st.error(f"❌ Error retrieving SharePoint documents: {error_msg}")
             return []
     
+    def _get_file_content(self, file_path: str, filename: str) -> str:
+        """Get content from a SharePoint file"""
+        try:
+            if not self.ctx or not file_path:
+                return f"[Content not available for {filename}]"
+            
+            # Get file object
+            file_obj = self.ctx.web.get_file_by_server_relative_url(file_path)
+            file_content = file_obj.read()
+            self.ctx.execute_query()
+            
+            # Extract text based on file type
+            file_ext = filename.split('.')[-1].lower() if '.' in filename else ''
+            
+            if file_ext == 'txt':
+                return file_content.decode('utf-8', errors='ignore')
+            elif file_ext in ['pdf', 'docx']:
+                # For now, return a placeholder
+                # In a full implementation, you'd use PyPDF2 or python-docx here
+                return f"[{file_ext.upper()} content from {filename} - text extraction would be implemented here]"
+            else:
+                # Try to decode as text
+                try:
+                    return file_content.decode('utf-8', errors='ignore')
+                except:
+                    return f"[Binary content from {filename} - {len(file_content)} bytes]"
+                    
+        except Exception as e:
+            st.warning(f"Could not read content from {filename}: {str(e)}")
+            return f"[Could not extract content from {filename}]"
+    
     def _get_mock_documents(self) -> List[Dict]:
-        """Return mock documents for testing when SharePoint reader isn't available"""
+        """Return mock documents for testing"""
         mock_docs = [
             {
                 'id': 'mock_1',
-                'filename': 'Sample Document 1.pdf',
-                'content': 'This is a sample document for testing the ETL pipeline. It contains various information about project management and best practices.',
+                'filename': 'Quarterly Report Q1 2024.pdf',
+                'content': 'This is a sample quarterly report containing financial analysis, performance metrics, and strategic recommendations for Q1 2024. The report shows strong growth in key performance indicators.',
                 'modified': datetime.now().isoformat(),
-                'file_path': '/Shared Documents/Sample Document 1.pdf',
+                'file_path': '/sites/yoursite/Shared Documents/Reports/Quarterly Report Q1 2024.pdf',
                 'metadata': {
                     'source': 'mock_data',
-                    'created_at': datetime.now().isoformat(),
-                    'file_size': 1024,
-                    'author': 'System'
+                    'created_at': (datetime.now() - timedelta(days=7)).isoformat(),
+                    'file_size': 1024000,
+                    'author': 'Finance Team',
+                    'text_length': 150,
+                    'word_count': 25
                 }
             },
             {
                 'id': 'mock_2', 
-                'filename': 'Test Report.docx',
-                'content': 'This is a test report containing quarterly analysis and recommendations for improvement. The report covers multiple areas including performance metrics.',
-                'modified': (datetime.now() - timedelta(hours=2)).isoformat(),
-                'file_path': '/Shared Documents/Test Report.docx',
+                'filename': 'Project Status Update.docx',
+                'content': 'Weekly project status update covering milestone achievements, resource allocation, risk assessment, and next steps. All major deliverables are on track for the planned timeline.',
+                'modified': (datetime.now() - timedelta(hours=3)).isoformat(),
+                'file_path': '/sites/yoursite/Shared Documents/Projects/Project Status Update.docx',
                 'metadata': {
                     'source': 'mock_data',
-                    'created_at': (datetime.now() - timedelta(hours=2)).isoformat(),
-                    'file_size': 2048,
-                    'author': 'System'
+                    'created_at': (datetime.now() - timedelta(hours=3)).isoformat(),
+                    'file_size': 512000,
+                    'author': 'Project Manager',
+                    'text_length': 140,
+                    'word_count': 23
+                }
+            },
+            {
+                'id': 'mock_3',
+                'filename': 'Meeting Notes - Team Sync.txt',
+                'content': 'Team synchronization meeting notes including action items, decisions made, and follow-up tasks. Key topics discussed: budget planning, resource requirements, and timeline adjustments.',
+                'modified': (datetime.now() - timedelta(hours=8)).isoformat(),
+                'file_path': '/sites/yoursite/Shared Documents/Meetings/Meeting Notes - Team Sync.txt',
+                'metadata': {
+                    'source': 'mock_data',
+                    'created_at': (datetime.now() - timedelta(hours=8)).isoformat(),
+                    'file_size': 256000,
+                    'author': 'Team Lead',
+                    'text_length': 130,
+                    'word_count': 21
                 }
             }
         ]
         
         st.info(f"📋 Generated {len(mock_docs)} mock documents for testing")
         return mock_docs
-    
-    def _process_documents(self, documents, since_date, max_docs):
-        """Process SharePoint documents into the expected format"""
-        doc_list = []
-        processed_count = 0
-        
-        for doc in documents:
-            try:
-                # Extract metadata with fallbacks
-                filename = (
-                    doc.metadata.get('filename') or 
-                    doc.metadata.get('file_name') or 
-                    doc.metadata.get('title') or 
-                    doc.metadata.get('name') or
-                    f'Document_{processed_count + 1}'
-                )
-                
-                file_path = (
-                    doc.metadata.get('file_path') or 
-                    doc.metadata.get('source') or 
-                    doc.metadata.get('url') or
-                    ''
-                )
-                
-                modified_date = (
-                    doc.metadata.get('last_modified') or 
-                    doc.metadata.get('modified') or 
-                    doc.metadata.get('date_modified') or
-                    datetime.now().isoformat()
-                )
-                
-                doc_id = (
-                    doc.metadata.get('id') or 
-                    doc.metadata.get('doc_id') or 
-                    doc.metadata.get('document_id') or
-                    f'doc_{processed_count + 1}'
-                )
-                
-                # Create document info
-                doc_info = {
-                    'content': doc.text or '',
-                    'filename': filename,
-                    'file_path': file_path,
-                    'modified': modified_date,
-                    'id': doc_id,
-                    'metadata': {
-                        **doc.metadata,
-                        'source': 'sharepoint',
-                        'processed_at': datetime.now().isoformat(),
-                        'text_length': len(doc.text) if doc.text else 0,
-                        'word_count': len(doc.text.split()) if doc.text else 0
-                    }
-                }
-                
-                # Apply filters
-                if since_date:
-                    try:
-                        doc_modified_str = doc_info['modified']
-                        if isinstance(doc_modified_str, str):
-                            if 'T' in doc_modified_str:
-                                doc_modified = datetime.fromisoformat(doc_modified_str.replace('Z', '+00:00'))
-                            else:
-                                doc_modified = datetime.fromisoformat(doc_modified_str)
-                        else:
-                            doc_modified = doc_modified_str
-                        
-                        if doc_modified < since_date:
-                            continue
-                    except Exception as date_error:
-                        st.warning(f"Could not parse date for {filename}: {date_error}")
-                
-                # Check content
-                if not doc.text or not doc.text.strip():
-                    st.warning(f"⚠️ No text content found in {filename}")
-                    continue
-                
-                doc_list.append(doc_info)
-                processed_count += 1
-                
-                # Apply max docs limit
-                if max_docs and processed_count >= max_docs:
-                    st.info(f"📊 Reached maximum document limit: {max_docs}")
-                    break
-                    
-            except Exception as doc_error:
-                st.warning(f"Error processing document: {str(doc_error)}")
-                continue
-        
-        st.success(f"✅ Successfully processed {len(doc_list)} documents")
-        return doc_list
     
     def get_recent_changes(self, hours: int = 24) -> List[Dict]:
         """Get documents modified in the last N hours"""
@@ -294,26 +336,44 @@ class SharePointClient:
             'client_secret': bool(self.client_secret),
             'tenant_id': bool(self.tenant_id),
             'site_name': bool(self.site_name),
-            'reader_available': SHAREPOINT_AVAILABLE and SharePointReader is not None,
-            'reader_initialized': bool(self.reader)
+            'tenant_name': bool(self.tenant_name),
+            'office365_available': OFFICE365_AVAILABLE,
+            'client_initialized': bool(self.ctx),
+            'site_url': bool(self.site_url)
         }
         
         return config_status
     
     def get_site_info(self) -> Dict:
         """Get SharePoint site information"""
+        return {
+            'site_name': self.site_name or 'Not configured',
+            'tenant_name': self.tenant_name or 'Not configured',
+            'tenant_id': self.tenant_id[:8] + "..." if self.tenant_id else "Not configured",
+            'client_id': self.client_id[:8] + "..." if self.client_id else "Not configured",
+            'site_url': self.site_url,
+            'client_status': 'Available' if self.ctx else 'Not available',
+            'office365_package_status': 'Installed' if OFFICE365_AVAILABLE else 'Missing'
+        }
+    
+    def get_available_libraries(self) -> List[str]:
+        """Get list of available document libraries"""
+        if not OFFICE365_AVAILABLE or not self.ctx:
+            return ["Shared Documents", "Documents", "Site Assets"]
+        
         try:
-            site_info = {
-                'site_name': self.site_name or 'Not configured',
-                'tenant_id': self.tenant_id[:8] + "..." if self.tenant_id else "Not configured",
-                'client_id': self.client_id[:8] + "..." if self.client_id else "Not configured",
-                'reader_status': 'Available' if self.reader else 'Not available',
-                'reader_package_status': 'Installed' if SHAREPOINT_AVAILABLE else 'Missing',
-                'estimated_url': f"https://[tenant].sharepoint.com/sites/{self.site_name}" if self.site_name else "Not configured"
-            }
+            lists = self.ctx.web.lists
+            self.ctx.load(lists)
+            self.ctx.execute_query()
             
-            return site_info
+            libraries = []
+            for lst in lists:
+                list_props = lst.properties
+                if list_props.get('BaseTemplate') == 101:  # Document library template
+                    libraries.append(list_props.get('Title', 'Unknown'))
+            
+            return libraries if libraries else ["Shared Documents"]
             
         except Exception as e:
-            st.error(f"Error getting site info: {str(e)}")
-            return {}
+            st.warning(f"Could not get libraries: {str(e)}")
+            return ["Shared Documents"]
