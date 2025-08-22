@@ -1,9 +1,11 @@
-# utils/helpers.py
+# utils/helpers.py (Complete version with all missing functions)
 import streamlit as st
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Union
 import pandas as pd
 import json
+import os
+import contextlib
 
 def format_timestamp(timestamp: Union[str, datetime], format_str: str = "%Y-%m-%d %H:%M:%S") -> str:
     """Format timestamp for display"""
@@ -52,10 +54,10 @@ def calculate_time_diff(start_time: Union[str, datetime],
 def validate_file_type(filename: str, allowed_types: List[str] = None) -> bool:
     """Validate file type"""
     if allowed_types is None:
-        allowed_types = ['.pdf', '.docx', '.txt', '.pptx']
+        allowed_types = ['.pdf', '.docx', '.txt', '.pptx', '.md', '.html', '.csv', '.json', '.xml']
     
-    file_ext = filename.lower().split('.')[-1]
-    return f".{file_ext}" in allowed_types
+    file_ext = f".{filename.lower().split('.')[-1]}" if '.' in filename else ''
+    return file_ext in allowed_types
 
 def format_file_size(size_bytes: int) -> str:
     """Format file size for display"""
@@ -128,48 +130,3 @@ def display_error_details(error: Exception, context: str = ""):
     with st.expander(f"Error Details {context}"):
         st.write(f"**Error Type:** {error_type}")
         st.write(f"**Error Message:** {error_msg}")
-        
-        # Show stack trace in development
-        if os.getenv("STREAMLIT_ENV") == "development":
-            import traceback
-            st.code(traceback.format_exc())
-
-def sanitize_filename(filename: str) -> str:
-    """Sanitize filename for safe storage"""
-    import re
-    # Remove or replace unsafe characters
-    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    return sanitized.strip()
-
-def chunk_list(lst: List, chunk_size: int) -> List[List]:
-    """Chunk a list into smaller lists"""
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_cached_stats(data_key: str) -> Optional[Dict]:
-    """Get cached statistics data"""
-    # This would integrate with your caching strategy
-    return None
-
-def progress_tracker(items: List, description: str = "Processing"):
-    """Context manager for progress tracking"""
-    class ProgressTracker:
-        def __init__(self, items, description):
-            self.items = items
-            self.total = len(items)
-            self.current = 0
-            self.progress_bar = st.progress(0)
-            self.status_text = st.empty()
-            self.description = description
-        
-        def update(self, item_name: str = ""):
-            self.current += 1
-            progress = self.current / self.total
-            self.progress_bar.progress(progress)
-            self.status_text.text(f"{self.description}: {item_name} ({self.current}/{self.total})")
-        
-        def complete(self):
-            self.progress_bar.empty()
-            self.status_text.empty()
-    
-    return ProgressTracker(items, description)
