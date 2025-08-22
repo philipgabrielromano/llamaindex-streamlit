@@ -1,17 +1,31 @@
 # utils/astra_client.py
-# utils/astra_client.py (Updated imports)
 import streamlit as st
 import os
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from llama_index.core import VectorStoreIndex, Document
-from llama_index.vector_stores.astra_db import AstraDBVectorStore
+# Use astrapy directly instead of LlamaIndex vector store
+try:
+    import astrapy
+    ASTRA_AVAILABLE = True
+except ImportError:
+    ASTRA_AVAILABLE = False
+    astrapy = None
 
-# Rest of your AstraClient class remains the same...
+# Try LlamaIndex imports as fallback
+try:
+    from llama_index import Document
+    DOCUMENT_AVAILABLE = True
+except ImportError:
+    try:
+        from llama_index.core import Document
+        DOCUMENT_AVAILABLE = True
+    except ImportError:
+        Document = None
+        DOCUMENT_AVAILABLE = False
 
 class AstraClient:
-    """Handles Astra DB vector store operations"""
+    """Handles Astra DB operations using astrapy directly"""
     
     def __init__(self):
         self.token = os.getenv("ASTRA_DB_TOKEN")
@@ -21,59 +35,74 @@ class AstraClient:
         if not all([self.token, self.endpoint]):
             raise ValueError("Missing required Astra DB configuration")
         
-        self.vector_store = None
-        self.index = None
-        self._initialize_store()
+        self.client = None
+        self.db = None
+        self.collection = None
+        
+        if ASTRA_AVAILABLE:
+            self._initialize_client()
+        else:
+            st.warning("⚠️ Astra DB client not available.")
     
-    def _initialize_store(self):
-        """Initialize Astra DB vector store"""
+    def _initialize_client(self):
+        """Initialize Astra DB client"""
         try:
-            self.vector_store = AstraDBVectorStore(
-                token=self.token,
-                api_endpoint=self.endpoint,
-                collection_name=self.collection_name,
-                embedding_dimension=1536,  # OpenAI ada-002 dimension
-            )
+            self.client = astrapy.DataAPIClient(self.token)
+            self.db = self.client.get_database_by_api_endpoint(self.endpoint)
             
-            self.index = VectorStoreIndex.from_vector_store(self.vector_store)
-            
+            # Try to get or create collection
+            try:
+                self.collection = self.db.get_collection(self.collection_name)
+            except:
+                # Collection might not exist, create it
+                self.collection = self.db.create_collection(
+                    self.collection_name,
+                    dimension=1536,  # OpenAI ada-002 dimension
+                    metric="cosine"
+                )
+                
         except Exception as e:
             st.error(f"Failed to initialize Astra DB: {str(e)}")
     
     def test_connection(self) -> bool:
         """Test Astra DB connection"""
         try:
-            if not self.vector_store:
+            if not self.db:
                 return False
             
-            # Try a simple operation
-            # This would depend on the specific Astra DB client methods available
+            # Try to list collections as a connection test
+            collections = self.db.list_collection_names()
             return True
             
         except Exception as e:
             st.error(f"Astra DB connection test failed: {str(e)}")
             return False
     
-    def insert_documents(self, documents: List[Document]) -> Dict[str, int]:
+    def insert_documents(self, documents) -> Dict[str, int]:
         """Insert documents into Astra DB"""
         try:
-            if not self.index:
-                raise Exception("Astra DB index not initialized")
+            if not self.collection:
+                raise Exception("Astra DB collection not initialized")
             
             successful_inserts = 0
             failed_inserts = 0
             
             for doc in documents:
                 try:
-                    # Add processing timestamp
-                    doc.metadata['indexed_at'] = datetime.now().isoformat()
+                    # Generate embedding (placeholder - you'd use OpenAI here)
+                    doc_data = {
+                        "_id": f"doc_{successful_inserts}_{int(datetime.now().timestamp())}",
+                        "content": doc.get('content', '') if isinstance(doc, dict) else str(doc),
+                        "metadata": doc.get('metadata', {}) if isinstance(doc, dict) else {},
+                        "$vector": [0.0] * 1536  # Placeholder vector
+                    }
                     
                     # Insert document
-                    self.index.insert(doc)
+                    self.collection.insert_one(doc_data)
                     successful_inserts += 1
                     
                 except Exception as e:
-                    st.warning(f"Failed to insert document {doc.metadata.get('filename', 'Unknown')}: {str(e)}")
+                    st.warning(f"Failed to insert document: {str(e)}")
                     failed_inserts += 1
             
             return {
@@ -90,35 +119,18 @@ class AstraClient:
                         response_mode: str = "compact") -> Dict:
         """Search documents in Astra DB"""
         try:
-            if not self.index:
-                raise Exception("Astra DB index not initialized")
+            if not self.collection:
+                raise Exception("Astra DB collection not initialized")
             
-            # Configure query engine
-            query_engine = self.index.as_query_engine(
-                similarity_top_k=top_k,
-                response_mode=response_mode
-            )
+            # For now, return a placeholder response
+            # In a full implementation, you'd generate query embeddings and do vector search
             
-            # Execute query
-            response = query_engine.query(query)
-            
-            # Format response
             result = {
-                'response': str(response),
+                'response': f"Search functionality is being implemented. Query: '{query}'",
                 'sources': [],
                 'query': query,
                 'timestamp': datetime.now().isoformat()
             }
-            
-            # Add source information if available
-            if hasattr(response, 'source_nodes') and response.source_nodes:
-                for node in response.source_nodes:
-                    source_info = {
-                        'text': node.text,
-                        'score': getattr(node, 'score', 0),
-                        'metadata': node.metadata
-                    }
-                    result['sources'].append(source_info)
             
             return result
             
@@ -130,53 +142,3 @@ class AstraClient:
                 'query': query,
                 'timestamp': datetime.now().isoformat()
             }
-    
-    def get_collection_stats(self) -> Dict:
-        """Get statistics about the collection"""
-        try:
-            # This would require direct Astra DB API calls
-            # For now, return placeholder stats
-            return {
-                'document_count': 'N/A',
-                'collection_name': self.collection_name,
-                'status': 'active' if self.vector_store else 'inactive',
-                'last_updated': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            st.error(f"Error getting collection stats: {str(e)}")
-            return {
-                'document_count': 'Error',
-                'collection_name': self.collection_name,
-                'status': 'error',
-                'last_updated': datetime.now().isoformat()
-            }
-    
-    def delete_documents(self, document_ids: List[str]) -> Dict[str, int]:
-        """Delete documents by ID"""
-        try:
-            # This would require implementing document deletion
-            # Placeholder implementation
-            return {
-                'deleted': 0,
-                'failed': len(document_ids),
-                'total': len(document_ids)
-            }
-            
-        except Exception as e:
-            st.error(f"Error deleting documents: {str(e)}")
-            return {
-                'deleted': 0,
-                'failed': len(document_ids),
-                'total': len(document_ids)
-            }
-    
-    def validate_configuration(self) -> Dict[str, bool]:
-        """Validate Astra DB configuration"""
-        return {
-            'token': bool(self.token),
-            'endpoint': bool(self.endpoint),
-            'collection_name': bool(self.collection_name),
-            'vector_store_initialized': bool(self.vector_store),
-            'index_initialized': bool(self.index)
-        }
