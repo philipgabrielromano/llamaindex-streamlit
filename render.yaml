@@ -1,0 +1,24 @@
+# render.yaml
+services:
+  - type: web
+    name: sharepoint-etl-dashboard
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ASTRA_DB_TOKEN
+        sync: false
+      - key: ASTRA_DB_ENDPOINT
+        sync: false
+      - key: ASTRA_COLLECTION_NAME
+        value: documents
+      - key: SHAREPOINT_CLIENT_ID
+        sync: false
+      - key: SHAREPOINT_CLIENT_SECRET
+        sync: false
+      - key: SHAREPOINT_TENANT_ID
+        sync: false
+      - key: SHAREPOINT_SITE_NAME
+        sync: false
