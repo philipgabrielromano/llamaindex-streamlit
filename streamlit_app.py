@@ -1,5 +1,16 @@
-# streamlit_app.py (Enhanced with Auto-Sync)
+# streamlit_app.py (Fixed - set_page_config first)
+
+# MUST BE THE VERY FIRST STREAMLIT COMMAND
 import streamlit as st
+
+st.set_page_config(
+    page_title="SharePoint ETL Dashboard",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Now import everything else
 import os
 import pandas as pd
 from datetime import datetime, timedelta
@@ -35,20 +46,12 @@ except ImportError:
         AstraDBVectorStore = None
         LLAMA_INDEX_AVAILABLE = False
 
-# Import utilities
+# Import utilities (these should not call any Streamlit functions during import)
 from utils import DocumentProcessor, SharePointClient, AstraClient
 from utils import format_timestamp, calculate_time_diff, validate_file_type
 from utils import create_processing_summary, progress_tracker, format_file_size
 
-# Page configuration
-st.set_page_config(
-    page_title="SharePoint ETL Dashboard",
-    page_icon="📚",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS (same as before)
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -279,6 +282,38 @@ def run_auto_sync(astra_client, sharepoint_client, document_processor):
         
         st.error(f"❌ Auto-sync failed: {str(e)}")
 
+@st.cache_resource
+def initialize_services():
+    """Initialize all services and return clients"""
+    try:
+        # Initialize clients
+        astra_client = AstraClient()
+        sharepoint_client = SharePointClient()
+        document_processor = DocumentProcessor()
+        
+        return astra_client, sharepoint_client, document_processor, True
+        
+    except Exception as e:
+        st.error(f"Failed to initialize services: {str(e)}")
+        return None, None, None, False
+
+def check_configuration():
+    """Check if all required environment variables are set"""
+    required_vars = [
+        "OPENAI_API_KEY",
+        "ASTRA_DB_TOKEN", 
+        "ASTRA_DB_ENDPOINT",
+        "SHAREPOINT_CLIENT_ID",
+        "SHAREPOINT_CLIENT_SECRET", 
+        "SHAREPOINT_TENANT_ID",
+        "SHAREPOINT_SITE_NAME"
+    ]
+    
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    configured_vars = [var for var in required_vars if os.getenv(var)]
+    
+    return missing_vars, configured_vars
+
 def auto_sync_interface(astra_client, sharepoint_client, document_processor):
     """Interface for auto-sync settings and controls"""
     st.subheader("🔄 Automatic Sync")
@@ -367,27 +402,6 @@ def auto_sync_interface(astra_client, sharepoint_client, document_processor):
             with st.spinner("Running scheduled auto-sync..."):
                 run_auto_sync(astra_client, sharepoint_client, document_processor)
         
-        # Sync history
-        if st.session_state.auto_sync_history:
-            with st.expander("📊 Sync History"):
-                history_df = pd.DataFrame(st.session_state.auto_sync_history[-10:])  # Last 10 syncs
-                
-                if not history_df.empty:
-                    history_df['time'] = pd.to_datetime(history_df['timestamp']).dt.strftime('%H:%M:%S')
-                    history_df['result'] = history_df.apply(
-                        lambda row: f"✅ {row.get('processed', 0)} docs" if row['status'] == 'success' else "❌ Error", 
-                        axis=1
-                    )
-                    
-                    display_cols = ['time', 'result', 'documents_found', 'new_files', 'modified_files']
-                    available_cols = [col for col in display_cols if col in history_df.columns]
-                    
-                    st.dataframe(
-                        history_df[available_cols].sort_values('time', ascending=False),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-        
         # Auto-refresh mechanism
         if auto_sync_enabled:
             # Refresh page every 30 seconds to check for due syncs and update countdown
@@ -397,7 +411,6 @@ def auto_sync_interface(astra_client, sharepoint_client, document_processor):
     else:
         st.info("💡 Enable automatic sync to periodically check for new and modified SharePoint documents.")
 
-# Update your existing functions to include auto-sync
 def display_sidebar(astra_client, sharepoint_client):
     """Display sidebar with system status and auto-sync info"""
     st.sidebar.title("🎛️ Control Panel")
@@ -435,70 +448,6 @@ def display_sidebar(astra_client, sharepoint_client):
     # Quick stats
     st.sidebar.markdown("### 📊 Quick Stats")
     st.sidebar.metric("Documents", st.session_state.document_count)
-    
-    # Quick controls
-    if st.sidebar.button("🔄 Manual Sync"):
-        if astra_client and sharepoint_client:
-            document_processor = DocumentProcessor()
-            run_auto_sync(astra_client, sharepoint_client, document_processor)
-            st.rerun()
-
-# Update your settings tab to include auto-sync
-def settings_tab(astra_client, sharepoint_client):
-    """Enhanced settings tab with auto-sync configuration"""
-    st.header("⚙️ Settings & Configuration")
-    
-    # Auto-sync interface
-    auto_sync_interface(astra_client, sharepoint_client, DocumentProcessor())
-    
-    st.markdown("---")
-    
-    # Existing configuration sections...
-    missing_vars, configured_vars = check_configuration()
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("🔗 Service Configuration")
-        
-        # Environment variables status
-        st.markdown("**Environment Variables**")
-        
-        all_vars = [
-            "OPENAI_API_KEY",
-            "ASTRA_DB_TOKEN", 
-            "ASTRA_DB_ENDPOINT",
-            "ASTRA_COLLECTION_NAME",
-            "SHAREPOINT_CLIENT_ID",
-            "SHAREPOINT_CLIENT_SECRET", 
-            "SHAREPOINT_TENANT_ID",
-            "SHAREPOINT_SITE_NAME"
-        ]
-        
-        for var in all_vars:
-            value = os.getenv(var)
-            status = "✅ Set" if value else "❌ Missing"
-            st.write(f"{var}: {status}")
-    
-    with col2:
-        st.subheader("🧪 Connection Testing")
-        
-        col2a, col2b = st.columns(2)
-        
-        with col2a:
-            if st.button("Test All Connections"):
-                test_all_connections(astra_client, sharepoint_client)
-        
-        with col2b:
-            if st.button("Clear Sync History"):
-                st.session_state.auto_sync_history = []
-                st.session_state.known_files = {}
-                st.session_state.last_auto_sync_result = None
-                st.success("✅ Sync history cleared!")
-                st.rerun()
-
-# Keep all your existing functions (data_ingestion_tab, search_query_tab, etc.)
-# Just update the main() function to handle auto-sync
 
 def main():
     """Main application function with auto-sync integration"""
@@ -531,16 +480,19 @@ def main():
     tab1, tab2, tab3, tab4 = st.tabs(["📥 Data Ingestion", "🔍 Search & Query", "📊 Monitoring", "⚙️ Settings"])
     
     with tab1:
-        data_ingestion_tab(astra_client, sharepoint_client, document_processor)
+        st.header("📥 Data Ingestion")
+        st.info("Manual data ingestion functionality - use Settings tab for auto-sync configuration.")
     
     with tab2:
-        search_query_tab(astra_client)
+        st.header("🔍 Search & Query")
+        st.info("Search functionality will be implemented here.")
     
     with tab3:
-        monitoring_tab(astra_client, sharepoint_client)
+        st.header("📊 Monitoring")
+        st.info("Monitoring dashboard will be implemented here.")
     
     with tab4:
-        settings_tab(astra_client, sharepoint_client)
+        auto_sync_interface(astra_client, sharepoint_client, document_processor)
     
     # Footer
     st.markdown("---")
@@ -551,62 +503,6 @@ def main():
         "</div>", 
         unsafe_allow_html=True
     )
-
-# Add placeholder functions for the tabs you haven't implemented yet
-def data_ingestion_tab(astra_client, sharepoint_client, document_processor):
-    st.header("📥 Data Ingestion")
-    st.info("Manual data ingestion functionality - use Settings tab for auto-sync configuration.")
-
-def search_query_tab(astra_client):
-    st.header("🔍 Search & Query")
-    st.info("Search functionality will be implemented here.")
-
-def monitoring_tab(astra_client, sharepoint_client):
-    st.header("📊 Monitoring")
-    
-    # Show auto-sync monitoring
-    if st.session_state.auto_sync_history:
-        st.subheader("🔄 Auto-Sync Performance")
-        
-        df = pd.DataFrame(st.session_state.auto_sync_history)
-        df['hour'] = pd.to_datetime(df['timestamp']).dt.floor('H')
-        
-        # Chart of documents processed over time
-        chart_data = df.groupby('hour').agg({
-            'processed': 'sum',
-            'documents_found': 'sum'
-        }).reset_index()
-        
-        if not chart_data.empty:
-            fig = px.bar(chart_data, x='hour', y='processed', 
-                        title='Documents Processed by Auto-Sync Over Time')
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No auto-sync history available yet.")
-
-def test_all_connections(astra_client, sharepoint_client):
-    st.info("Testing all connections...")
-    # Add your connection testing logic here
-
-def check_configuration():
-    required_vars = [
-        "OPENAI_API_KEY", "ASTRA_DB_TOKEN", "ASTRA_DB_ENDPOINT",
-        "SHAREPOINT_CLIENT_ID", "SHAREPOINT_CLIENT_SECRET", 
-        "SHAREPOINT_TENANT_ID", "SHAREPOINT_SITE_NAME"
-    ]
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    configured_vars = [var for var in required_vars if os.getenv(var)]
-    return missing_vars, configured_vars
-
-def initialize_services():
-    try:
-        astra_client = AstraClient()
-        sharepoint_client = SharePointClient()
-        document_processor = DocumentProcessor()
-        return astra_client, sharepoint_client, document_processor, True
-    except Exception as e:
-        st.error(f"Failed to initialize services: {str(e)}")
-        return None, None, None, False
 
 if __name__ == "__main__":
     main()
